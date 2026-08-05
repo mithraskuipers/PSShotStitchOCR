@@ -283,7 +283,7 @@ $script:DefaultConfig = [ordered]@{
     MoveResizeStepPixels        = 10
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
-    AutoCaptureIntervalSeconds = 5
+    AutoCaptureIntervalMs      = 5000   # minimum 500
     AutoCaptureAutoStart       = $false
     AutoCaptureUseSessionFolders   = $true
     AutoCaptureSessionFolderScheme = 'Session_{date}_{time}'
@@ -377,10 +377,20 @@ function Get-ToolConfig {
         $cfg.SaveLocation = Join-Path -Path $ProjectRoot -ChildPath $cfg.SaveLocation
     }
 
-    $interval = 0
-    [void][int]::TryParse([string]$cfg.AutoCaptureIntervalSeconds, [ref]$interval)
-    if ($interval -lt 1) { $interval = 5 }
-    $cfg.AutoCaptureIntervalSeconds = $interval
+    $intervalMs = 0
+    [void][int]::TryParse([string]$cfg.AutoCaptureIntervalMs, [ref]$intervalMs)
+    if ($intervalMs -le 0 -and $loaded -and
+        ($loaded.PSObject.Properties.Name -contains 'AutoCaptureIntervalSeconds') -and
+        -not ($loaded.PSObject.Properties.Name -contains 'AutoCaptureIntervalMs')) {
+        # Migrate a config saved by an older version of this tool, which
+        # stored the interval in whole seconds instead of milliseconds.
+        $oldSeconds = 0
+        [void][int]::TryParse([string]$loaded.AutoCaptureIntervalSeconds, [ref]$oldSeconds)
+        if ($oldSeconds -gt 0) { $intervalMs = $oldSeconds * 1000 }
+    }
+    if ($intervalMs -le 0) { $intervalMs = 5000 }
+    if ($intervalMs -lt 500) { $intervalMs = 500 }
+    $cfg.AutoCaptureIntervalMs = $intervalMs
     $cfg.AutoCaptureAutoStart = [bool]$cfg.AutoCaptureAutoStart
     $cfg.AutoCaptureUseSessionFolders = [bool]$cfg.AutoCaptureUseSessionFolders
     if ([string]::IsNullOrWhiteSpace([string]$cfg.AutoCaptureSessionFolderScheme)) {
@@ -995,6 +1005,12 @@ function Start-ReviewTool {
     }
 }
 
+function Format-IntervalMs {
+    param([int]$Milliseconds)
+    if ($Milliseconds % 1000 -eq 0) { return "$($Milliseconds / 1000)s" }
+    return "${Milliseconds}ms"
+}
+
 function Start-AutoCapture {
     if ($script:Config.AutoCaptureUseSessionFolders) {
         $script:currentSessionFolder = Join-Path -Path $script:Config.SaveLocation -ChildPath (New-AutoCaptureSessionFolderName)
@@ -1003,10 +1019,10 @@ function Start-AutoCapture {
     else {
         $script:currentSessionFolder = $null
     }
-    $script:autoCaptureTimer.Interval = [Math]::Max(1, [int]$script:Config.AutoCaptureIntervalSeconds) * 1000
+    $script:autoCaptureTimer.Interval = [Math]::Max(500, [int]$script:Config.AutoCaptureIntervalMs)
     $script:autoCaptureTimer.Start()
-    $itemAutoCapture.Text = "Stop Auto-Capture (every $($script:Config.AutoCaptureIntervalSeconds)s)"
-    $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Started', "Capturing every $($script:Config.AutoCaptureIntervalSeconds) second(s).", [System.Windows.Forms.ToolTipIcon]::Info)
+    $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
+    $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Started', "Capturing every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs).", [System.Windows.Forms.ToolTipIcon]::Info)
 }
 
 function Stop-AutoCapture {
@@ -1040,8 +1056,8 @@ $itemAutoCapture.Add_Click({
 $itemReload.Add_Click({
     Apply-Config
     if ($script:autoCaptureTimer.Enabled) {
-        $script:autoCaptureTimer.Interval = [Math]::Max(1, [int]$script:Config.AutoCaptureIntervalSeconds) * 1000
-        $itemAutoCapture.Text = "Stop Auto-Capture (every $($script:Config.AutoCaptureIntervalSeconds)s)"
+        $script:autoCaptureTimer.Interval = [Math]::Max(500, [int]$script:Config.AutoCaptureIntervalMs)
+        $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
     }
     $trayIcon.ShowBalloonTip(1500, 'Region Screenshot Tool', 'Config reloaded.', [System.Windows.Forms.ToolTipIcon]::Info)
 })

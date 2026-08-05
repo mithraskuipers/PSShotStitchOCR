@@ -58,7 +58,7 @@ $Defaults = [ordered]@{
     MoveResizeStepPixels        = 10
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
-    AutoCaptureIntervalSeconds = 5
+    AutoCaptureIntervalMs      = 5000   # minimum 500
     AutoCaptureAutoStart       = $false
     AutoActionKeyName          = ''
     AutoActionVKCodes          = @()
@@ -84,6 +84,16 @@ function Load-CurrentConfig {
             if (-not ($loaded.PSObject.Properties.Name -contains 'HotkeyVKCodes') -and
                 ($loaded.PSObject.Properties.Name -contains 'HotkeyVKCode')) {
                 $cfg.HotkeyVKCodes = @([int]$loaded.HotkeyVKCode)
+            }
+
+            # Migrate a config saved by an older version of this tool, which
+            # stored the auto-capture interval in whole seconds instead of
+            # milliseconds.
+            if (-not ($loaded.PSObject.Properties.Name -contains 'AutoCaptureIntervalMs') -and
+                ($loaded.PSObject.Properties.Name -contains 'AutoCaptureIntervalSeconds')) {
+                $oldSeconds = 0
+                [void][int]::TryParse([string]$loaded.AutoCaptureIntervalSeconds, [ref]$oldSeconds)
+                if ($oldSeconds -gt 0) { $cfg.AutoCaptureIntervalMs = $oldSeconds * 1000 }
             }
         } catch { }
     }
@@ -154,6 +164,12 @@ function Load-CurrentConfig {
         $cfg.AutoCaptureSessionFolderScheme = 'Session_{date}_{time}'
     }
     $cfg.AutoLaunchReviewOnStop = [bool]$cfg.AutoLaunchReviewOnStop
+
+    $intervalMs = 0
+    [void][int]::TryParse([string]$cfg.AutoCaptureIntervalMs, [ref]$intervalMs)
+    if ($intervalMs -le 0) { $intervalMs = 5000 }
+    if ($intervalMs -lt 500) { $intervalMs = 500 }
+    $cfg.AutoCaptureIntervalMs = $intervalMs
 
     return $cfg
 }
@@ -797,17 +813,18 @@ $grpAuto.Controls.Add($sep)
 
 # Delay between screenshots.
 $lblInterval = New-Object System.Windows.Forms.Label
-$lblInterval.Text = 'Time between screenshots (seconds, can be as low as 1):'
+$lblInterval.Text = 'Time between screenshots (milliseconds, minimum 500):'
 $lblInterval.AutoSize = $true
 $lblInterval.Location = New-Object System.Drawing.Point(15, 180)
 $grpAuto.Controls.Add($lblInterval)
 
 $numInterval = New-Object System.Windows.Forms.NumericUpDown
-$numInterval.Location = New-Object System.Drawing.Point(15, 200)
-$numInterval.Size     = New-Object System.Drawing.Size(80, 24)
-$numInterval.Minimum  = 1
-$numInterval.Maximum  = 86400
-$numInterval.Value    = [Math]::Max(1, [int]$current.AutoCaptureIntervalSeconds)
+$numInterval.Location  = New-Object System.Drawing.Point(15, 200)
+$numInterval.Size      = New-Object System.Drawing.Size(90, 24)
+$numInterval.Minimum   = 500
+$numInterval.Maximum   = 86400000
+$numInterval.Increment = 100
+$numInterval.Value     = [Math]::Max(500, [int]$current.AutoCaptureIntervalMs)
 $grpAuto.Controls.Add($numInterval)
 
 $chkAutoStart = New-Object System.Windows.Forms.CheckBox
@@ -954,7 +971,7 @@ $btnSave.Add_Click({
         MoveResizeStepPixels        = [int]$numMoveStep.Value
         SaveLocation                = $txtSave.Text
         FileNameScheme              = $txtScheme.Text
-        AutoCaptureIntervalSeconds = [int]$numInterval.Value
+        AutoCaptureIntervalMs      = [int]$numInterval.Value
         AutoCaptureAutoStart       = [bool]$chkAutoStart.Checked
         AutoActionKeyName          = $txtActionKey.Text
         AutoActionVKCodes          = @($txtActionKey.Tag)
@@ -1003,7 +1020,7 @@ $btnDefaults.Add_Click({
     $numMoveStep.Value = [int]$Defaults.MoveResizeStepPixels
     $txtSave.Text   = $Defaults.SaveLocation
     $txtScheme.Text = $Defaults.FileNameScheme
-    $numInterval.Value = [int]$Defaults.AutoCaptureIntervalSeconds
+    $numInterval.Value = [int]$Defaults.AutoCaptureIntervalMs
     $chkAutoStart.Checked = [bool]$Defaults.AutoCaptureAutoStart
     $script:actionComboVKCodes = @($Defaults.AutoActionVKCodes)
     $script:actionDownKeys.Clear()

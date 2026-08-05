@@ -340,6 +340,11 @@ function Clear-ThumbnailGrid {
     if ($lastPictureBox.Image)  { $lastPictureBox.Image.Dispose();  $lastPictureBox.Image  = $null }
 }
 
+function Get-AllCardPaths {
+    # Looked up fresh on every call so it's never frozen by GetNewClosure().
+    return @($script:cards | ForEach-Object { $_.Path })
+}
+
 function New-ThumbnailCard {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -372,7 +377,7 @@ function New-ThumbnailCard {
     # Double-click opens the fullscreen slideshow viewer starting at this
     # screenshot, so you can see it fullsize and step through the rest.
     $pic.Add_DoubleClick({
-        $allPaths = @($script:cards | ForEach-Object { $_.Path })
+        $allPaths = @(Get-AllCardPaths)
         $startIdx = [array]::IndexOf($allPaths, $Path)
         Show-Slideshow -Files $allPaths -StartIndex ([Math]::Max(0, $startIdx))
     }.GetNewClosure())
