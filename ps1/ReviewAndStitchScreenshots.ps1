@@ -23,6 +23,11 @@
     your screenshots; this tool intentionally only surfaces the folders,
     since its job is reviewing frames, not tuning the matcher.
 
+    Double-click any thumbnail (or click "View Slideshow") to open a
+    fullscreen viewer: Left/Right arrow keys move to the previous/next
+    screenshot, Delete discards the one currently shown (same as checking
+    it and clicking "Discard Selected"), and Escape closes the viewer.
+
     Usage:
         ReviewAndStitchScreenshots.ps1 [-SourceFolder <path>]
 
@@ -184,6 +189,11 @@ $selectNoneBtn = New-Object System.Windows.Forms.Button
 $selectNoneBtn.Text = 'Select None'
 $selectNoneBtn.Size = New-Object System.Drawing.Size(90, 24)
 $gridToolbar.Controls.Add($selectNoneBtn)
+
+$slideshowBtn = New-Object System.Windows.Forms.Button
+$slideshowBtn.Text = 'View Slideshow'
+$slideshowBtn.Size = New-Object System.Drawing.Size(110, 24)
+$gridToolbar.Controls.Add($slideshowBtn)
 
 $discardBtn = New-Object System.Windows.Forms.Button
 $discardBtn.Text = 'Discard Selected'
@@ -359,6 +369,14 @@ function New-ThumbnailCard {
     # discard than hitting the small checkbox text.
     $pic.Add_Click({ $chk.Checked = -not $chk.Checked }.GetNewClosure())
 
+    # Double-click opens the fullscreen slideshow viewer starting at this
+    # screenshot, so you can see it fullsize and step through the rest.
+    $pic.Add_DoubleClick({
+        $allPaths = @($script:cards | ForEach-Object { $_.Path })
+        $startIdx = [array]::IndexOf($allPaths, $Path)
+        Show-Slideshow -Files $allPaths -StartIndex ([Math]::Max(0, $startIdx))
+    }.GetNewClosure())
+
     $gridFlow.Controls.Add($panel)
     $script:cards += , @{ Path = $Path; Panel = $panel; CheckBox = $chk; Thumb = $thumb }
 }
@@ -386,6 +404,140 @@ function Update-Preview {
 function Get-DiscardedFolderPath {
     param([Parameter(Mandatory)][string]$Folder)
     return (Join-Path -Path $Folder -ChildPath $DiscardedFolderName)
+}
+
+# ---------------------------------------------------------------------------
+# Fullscreen slideshow viewer
+# ---------------------------------------------------------------------------
+function Show-Slideshow {
+    <#
+        Fullscreen, borderless viewer over a list of screenshot paths.
+        Left/Right arrows step through them, Delete discards the one
+        currently shown (moves it to the Discarded subfolder, same as the
+        "Discard Selected" button), and Escape (or closing the window)
+        returns to the main Review & Stitch window. If anything was
+        discarded while browsing, the thumbnail grid behind it is
+        refreshed once the viewer closes.
+    #>
+    param(
+        [Parameter(Mandatory)][string[]]$Files,
+        [int]$StartIndex = 0
+    )
+
+    if (-not $Files -or $Files.Count -eq 0) { return }
+
+    # A mutable local copy so Delete can remove entries without touching
+    # the main grid's $script:cards while the viewer is open.
+    $list = New-Object System.Collections.Generic.List[string]
+    $list.AddRange([string[]]$Files)
+
+    $script:slideIndex = [Math]::Max(0, [Math]::Min($StartIndex, $list.Count - 1))
+    $script:slideshowDirty = $false
+
+    $viewer = New-Object System.Windows.Forms.Form
+    $viewer.FormBorderStyle = 'None'
+    $viewer.WindowState = 'Maximized'
+    $viewer.StartPosition = 'Manual'
+    $viewer.Bounds = [System.Windows.Forms.Screen]::FromControl($form).Bounds
+    $viewer.TopMost = $true
+    $viewer.ShowInTaskbar = $false
+    $viewer.BackColor = [System.Drawing.Color]::Black
+    $viewer.KeyPreview = $true
+
+    $pic = New-Object System.Windows.Forms.PictureBox
+    $pic.Dock = 'Fill'
+    $pic.SizeMode = 'Zoom'
+    $pic.BackColor = [System.Drawing.Color]::Black
+    $viewer.Controls.Add($pic)
+
+    $infoLabel = New-Object System.Windows.Forms.Label
+    $infoLabel.Dock = 'Bottom'
+    $infoLabel.Height = 34
+    $infoLabel.TextAlign = 'MiddleCenter'
+    $infoLabel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $infoLabel.ForeColor = [System.Drawing.Color]::White
+    $infoLabel.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $viewer.Controls.Add($infoLabel)
+    $infoLabel.BringToFront()
+
+    function Show-CurrentSlide {
+        if ($list.Count -eq 0) { $viewer.Close(); return }
+        if ($script:slideIndex -ge $list.Count) { $script:slideIndex = $list.Count - 1 }
+        if ($script:slideIndex -lt 0) { $script:slideIndex = 0 }
+
+        $path = $list[$script:slideIndex]
+        if ($pic.Image) { $pic.Image.Dispose(); $pic.Image = $null }
+        try {
+            # Read into memory (like New-ThumbnailBitmap) rather than
+            # Image.FromFile, so the file is never left locked - Delete
+            # needs to be able to move the currently-displayed file.
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $ms = New-Object System.IO.MemoryStream(, $bytes)
+            $pic.Image = [System.Drawing.Image]::FromStream($ms)
+        }
+        catch {
+            $pic.Image = $null
+        }
+
+        $infoLabel.Text = "$($script:slideIndex + 1) / $($list.Count)  -  " +
+            "$([System.IO.Path]::GetFileName($path))     |     " +
+            "Left/Right: navigate     Delete: discard     Esc: close"
+    }
+
+    function Remove-CurrentSlide {
+        if ($list.Count -eq 0) { return }
+        $path = $list[$script:slideIndex]
+        $folder = Split-Path -Path $path -Parent
+        $discardedFolder = Get-DiscardedFolderPath -Folder $folder
+        if (-not (Test-Path -LiteralPath $discardedFolder)) {
+            New-Item -ItemType Directory -Path $discardedFolder -Force | Out-Null
+        }
+
+        if ($pic.Image) { $pic.Image.Dispose(); $pic.Image = $null }
+
+        try {
+            $destName = [System.IO.Path]::GetFileName($path)
+            $dest = Join-Path -Path $discardedFolder -ChildPath $destName
+            if (Test-Path -LiteralPath $dest) {
+                $stamp = (Get-Date).ToString('HHmmss_fff')
+                $dest = Join-Path -Path $discardedFolder -ChildPath ("{0}_{1}{2}" -f
+                    [System.IO.Path]::GetFileNameWithoutExtension($destName), $stamp,
+                    [System.IO.Path]::GetExtension($destName))
+            }
+            Move-Item -LiteralPath $path -Destination $dest -Force
+            $list.RemoveAt($script:slideIndex)
+            $script:slideshowDirty = $true
+        }
+        catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Could not discard $($path): $($_.Exception.Message)", 'Review & Stitch') | Out-Null
+            return
+        }
+
+        Show-CurrentSlide
+    }
+
+    $viewer.Add_KeyDown({
+        param($s, $e)
+        switch ($e.KeyCode) {
+            'Right'  { $script:slideIndex++; Show-CurrentSlide; $e.Handled = $true }
+            'Left'   { $script:slideIndex--; Show-CurrentSlide; $e.Handled = $true }
+            'Delete' { Remove-CurrentSlide; $e.Handled = $true }
+            'Escape' { $viewer.Close(); $e.Handled = $true }
+        }
+    })
+
+    # Double-clicking the fullscreen image is a quick way back out too.
+    $pic.Add_DoubleClick({ $viewer.Close() })
+
+    $viewer.Add_Shown({ Show-CurrentSlide })
+    $viewer.Add_FormClosed({ if ($pic.Image) { $pic.Image.Dispose() } })
+
+    $viewer.ShowDialog($form) | Out-Null
+
+    if ($script:slideshowDirty) {
+        Update-ReviewGrid
+    }
 }
 
 function Update-ReviewGrid {
@@ -469,6 +621,15 @@ $selectAllBtn.Add_Click({
 
 $selectNoneBtn.Add_Click({
     foreach ($card in $script:cards) { $card.CheckBox.Checked = $false }
+})
+
+$slideshowBtn.Add_Click({
+    $allPaths = @($script:cards | ForEach-Object { $_.Path })
+    if ($allPaths.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show('No screenshots loaded.', 'Review & Stitch') | Out-Null
+        return
+    }
+    Show-Slideshow -Files $allPaths -StartIndex 0
 })
 
 $discardBtn.Add_Click({

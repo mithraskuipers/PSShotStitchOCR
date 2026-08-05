@@ -1,37 +1,29 @@
 ﻿{
-    "HotkeyName":  "Ctrl + Alt + Shift + S",
+    "HotkeyName":  "Alt + S",
     "HotkeyVKCodes":  [
-                          17,
                           18,
-                          16,
                           83
                       ],
-    "ClipboardHotkeyName":  "Ctrl + Alt + Shift + D",
+    "ClipboardHotkeyName":  "Ctrl + Shift + Alt + S",
     "ClipboardHotkeyVKCodes":  [
                                    17,
-                                   18,
                                    16,
-                                   68
+                                   18,
+                                   83
                                ],
-    "StopHotkeyName":  "Ctrl + Alt + Shift + Q",
+    "StopHotkeyName":  "Alt + Q",
     "StopHotkeyVKCodes":  [
-                              17,
                               18,
-                              16,
                               81
                           ],
-    "ToggleBorderHotkeyName":  "Ctrl + Alt + Shift + H",
+    "ToggleBorderHotkeyName":  "Alt + H",
     "ToggleBorderHotkeyVKCodes":  [
-                                      17,
                                       18,
-                                      16,
                                       72
                                   ],
-    "ToggleAutoCaptureHotkeyName":  "Alt + Ctrl + Shift + A",
+    "ToggleAutoCaptureHotkeyName":  "Alt + A",
     "ToggleAutoCaptureHotkeyVKCodes":  [
                                            18,
-                                           17,
-                                           16,
                                            65
                                        ],
     "MoveModifierName":  "Ctrl + Alt",
@@ -48,14 +40,14 @@
     "MoveResizeStepPixels":  10,
     "SaveLocation":  "screenshots",
     "FileNameScheme":  "screenshot_{timestamp}",
-    "AutoCaptureIntervalSeconds":  2,
+    "AutoCaptureIntervalSeconds":  5,
     "AutoCaptureAutoStart":  false,
-    "AutoActionKeyName":  "F5",
+    "AutoActionKeyName":  "",
     "AutoActionVKCodes":  [
-                              116
+
                           ],
     "AutoActionTiming":  "Before",
-    "AutoActionDelayMs":  1000,
+    "AutoActionDelayMs":  150,
     "AutoCaptureUseSessionFolders":  true,
     "AutoCaptureSessionFolderScheme":  "Session_{date}_{time}",
     "AutoLaunchReviewOnStop":  true
