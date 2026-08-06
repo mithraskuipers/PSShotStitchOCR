@@ -119,7 +119,62 @@ $url = "http://localhost:$Port/"
 Write-Host "Serving Screenshot Stitcher at $url"
 Write-Host "Session folder: $SourceFolder"
 Write-Host 'Press Ctrl+C here (or click Close in the browser) to stop.'
-Start-Process $url
+
+function Open-DefaultBrowser {
+    <#
+        Opening a URL is really "ask Windows to resolve the http:// protocol
+        association and launch whatever's registered for it" - and that
+        association is surprisingly easy to end up broken (a Windows update,
+        a policy, a prior browser uninstall leaving a stale ProgID) even
+        when a normal-looking default browser is installed. A failure here
+        must never be allowed to take the server down with it, so every
+        attempt is wrapped and logged rather than left to throw.
+    #>
+    param([string]$Url)
+
+    $attempts = @(
+        { Start-Process -FilePath $Url },
+        { Start-Process -FilePath 'rundll32.exe' -ArgumentList 'url.dll,FileProtocolHandler', $Url },
+        { Start-Process -FilePath 'explorer.exe' -ArgumentList $Url }
+    )
+    foreach ($attempt in $attempts) {
+        try {
+            & $attempt | Out-Null
+            return $true
+        }
+        catch {
+            Write-Warning "Browser launch attempt failed: $($_.Exception.Message)"
+        }
+    }
+
+    # Last resort: find Edge directly via its registered App Path (Edge
+    # ships with every supported Windows version, so this key is reliable
+    # even when the http:// association itself is broken) and launch it
+    # pointed straight at the URL, bypassing protocol resolution entirely.
+    try {
+        $edgePath = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe' -ErrorAction Stop).'(default)'
+        if ($edgePath -and (Test-Path -LiteralPath $edgePath)) {
+            Start-Process -FilePath $edgePath -ArgumentList $Url | Out-Null
+            return $true
+        }
+    }
+    catch {
+        Write-Warning "Edge fallback failed: $($_.Exception.Message)"
+    }
+
+    return $false
+}
+
+try {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    [System.Windows.Forms.Clipboard]::SetText($url)
+}
+catch { }
+
+if (-not (Open-DefaultBrowser -Url $url)) {
+    Write-Host "Couldn't open a browser automatically. The address has been copied to your clipboard - paste it into any browser:" -ForegroundColor Yellow
+    Write-Host "  $url" -ForegroundColor Yellow
+}
 
 $running = $true
 while ($running -and $listener.IsListening) {

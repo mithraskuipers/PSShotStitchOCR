@@ -56,6 +56,11 @@ $Defaults = [ordered]@{
     ResizeModifierName          = 'Ctrl + Alt + Shift'
     ResizeModifierVKCodes       = @(17, 18, 16)   # Ctrl+Alt+Shift + arrow key
     MoveResizeStepPixels        = 10
+    FineStepPixels               = 1
+    LastRegionX                  = 0
+    LastRegionY                  = 0
+    LastRegionWidth              = 0
+    LastRegionHeight             = 0
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
     AutoCaptureIntervalMs      = 5000   # minimum 500
@@ -136,6 +141,17 @@ function Load-CurrentConfig {
     [void][int]::TryParse([string]$cfg.MoveResizeStepPixels, [ref]$moveResizeStep)
     if ($moveResizeStep -lt 1) { $moveResizeStep = 10 }
     $cfg.MoveResizeStepPixels = $moveResizeStep
+
+    $fineStep = 0
+    [void][int]::TryParse([string]$cfg.FineStepPixels, [ref]$fineStep)
+    if ($fineStep -lt 1) { $fineStep = 1 }
+    $cfg.FineStepPixels = $fineStep
+
+    foreach ($key in @('LastRegionX', 'LastRegionY', 'LastRegionWidth', 'LastRegionHeight')) {
+        $v = 0
+        [void][int]::TryParse([string]$cfg[$key], [ref]$v)
+        $cfg[$key] = $v
+    }
 
     $cfg.AutoActionVKCodes = @($cfg.AutoActionVKCodes) | ForEach-Object { [int]$_ }
     if ([string]::IsNullOrWhiteSpace([string]$cfg.AutoActionKeyName)) { $cfg.AutoActionKeyName = '' }
@@ -609,18 +625,34 @@ $y += 40
 
 # --- Move/resize step size ---
 $lblMoveStep = New-Object System.Windows.Forms.Label
-$lblMoveStep.Text = 'Move/resize step (pixels per key press):'
+$lblMoveStep.Text = 'Hold-to-repeat step (pixels per tick once held):'
 $lblMoveStep.AutoSize = $true
 $lblMoveStep.Location = New-Object System.Drawing.Point(15, ($y + 3))
 $form.Controls.Add($lblMoveStep)
 
 $numMoveStep = New-Object System.Windows.Forms.NumericUpDown
-$numMoveStep.Location = New-Object System.Drawing.Point(255, $y)
+$numMoveStep.Location = New-Object System.Drawing.Point(300, $y)
 $numMoveStep.Size     = New-Object System.Drawing.Size(70, 24)
 $numMoveStep.Minimum  = 1
 $numMoveStep.Maximum  = 500
 $numMoveStep.Value    = [Math]::Max(1, [int]$current.MoveResizeStepPixels)
 $form.Controls.Add($numMoveStep)
+$y += 32
+
+# --- Fine (tap) step size ---
+$lblFineStep = New-Object System.Windows.Forms.Label
+$lblFineStep.Text = 'Tap step (pixels per quick press, for precise nudging):'
+$lblFineStep.AutoSize = $true
+$lblFineStep.Location = New-Object System.Drawing.Point(15, ($y + 3))
+$form.Controls.Add($lblFineStep)
+
+$numFineStep = New-Object System.Windows.Forms.NumericUpDown
+$numFineStep.Location = New-Object System.Drawing.Point(300, $y)
+$numFineStep.Size     = New-Object System.Drawing.Size(70, 24)
+$numFineStep.Minimum  = 1
+$numFineStep.Maximum  = 100
+$numFineStep.Value    = [Math]::Max(1, [int]$current.FineStepPixels)
+$form.Controls.Add($numFineStep)
 $y += 40
 
 # --- Save location ---
@@ -969,6 +1001,7 @@ $btnSave.Add_Click({
         ResizeModifierName          = $txtResizeModifier.Text
         ResizeModifierVKCodes       = @($txtResizeModifier.Tag)
         MoveResizeStepPixels        = [int]$numMoveStep.Value
+        FineStepPixels               = [int]$numFineStep.Value
         SaveLocation                = $txtSave.Text
         FileNameScheme              = $txtScheme.Text
         AutoCaptureIntervalMs      = [int]$numInterval.Value
@@ -980,6 +1013,10 @@ $btnSave.Add_Click({
         AutoCaptureUseSessionFolders   = [bool]$chkSessionFolders.Checked
         AutoCaptureSessionFolderScheme = $txtSessionScheme.Text
         AutoLaunchReviewOnStop     = [bool]$chkAutoLaunchReview.Checked
+        LastRegionX                  = [int]$current.LastRegionX
+        LastRegionY                  = [int]$current.LastRegionY
+        LastRegionWidth              = [int]$current.LastRegionWidth
+        LastRegionHeight             = [int]$current.LastRegionHeight
     }
     $toSave | ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
 
@@ -1018,6 +1055,7 @@ $btnDefaults.Add_Click({
     $script:resizeDownKeys.Clear()
     Update-ResizeModifierDisplay
     $numMoveStep.Value = [int]$Defaults.MoveResizeStepPixels
+    $numFineStep.Value = [int]$Defaults.FineStepPixels
     $txtSave.Text   = $Defaults.SaveLocation
     $txtScheme.Text = $Defaults.FileNameScheme
     $numInterval.Value = [int]$Defaults.AutoCaptureIntervalMs

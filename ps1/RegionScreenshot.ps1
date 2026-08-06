@@ -281,6 +281,11 @@ $script:DefaultConfig = [ordered]@{
     ResizeModifierName          = 'Ctrl + Alt + Shift'
     ResizeModifierVKCodes       = @(17, 18, 16)   # Ctrl+Alt+Shift + arrow key
     MoveResizeStepPixels        = 10
+    FineStepPixels               = 1     # applied on a quick tap; hold to repeat at MoveResizeStepPixels
+    LastRegionX                  = 0
+    LastRegionY                  = 0
+    LastRegionWidth              = 0     # 0 = no remembered region yet
+    LastRegionHeight             = 0
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
     AutoCaptureIntervalMs      = 5000   # minimum 500
@@ -368,6 +373,17 @@ function Get-ToolConfig {
     [void][int]::TryParse([string]$cfg.MoveResizeStepPixels, [ref]$moveResizeStep)
     if ($moveResizeStep -lt 1) { $moveResizeStep = 10 }
     $cfg.MoveResizeStepPixels = $moveResizeStep
+
+    $fineStep = 0
+    [void][int]::TryParse([string]$cfg.FineStepPixels, [ref]$fineStep)
+    if ($fineStep -lt 1) { $fineStep = 1 }
+    $cfg.FineStepPixels = $fineStep
+
+    foreach ($key in @('LastRegionX', 'LastRegionY', 'LastRegionWidth', 'LastRegionHeight')) {
+        $v = 0
+        [void][int]::TryParse([string]$cfg[$key], [ref]$v)
+        $cfg[$key] = $v
+    }
 
     # SaveLocation may be relative (e.g. "screenshots" or ".\MyShots") -
     # resolve it against the project root (one level up from ps1\) so it
@@ -772,6 +788,62 @@ function Resize-CaptureRegion {
     Sync-RegionBorder
 }
 
+function Save-LastRegion {
+    <#
+        Persists the current capture rectangle into config.json as
+        LastRegionX/Y/Width/Height, so next launch can offer to reuse it
+        instead of forcing a fresh drag-select every time. Reads the file
+        fresh and only touches those four properties, so it never clobbers
+        settings saved by Configure.ps1 (or hand-edited) in the meantime.
+    #>
+    param([System.Drawing.Rectangle]$Rect)
+    if (-not $Rect -or $Rect.Width -lt 10 -or $Rect.Height -lt 10) { return }
+    try {
+        $existing = if (Test-Path -LiteralPath $ConfigPath) {
+            Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+        } else {
+            [PSCustomObject]@{}
+        }
+        $existing | Add-Member -MemberType NoteProperty -Name 'LastRegionX'      -Value $Rect.X      -Force
+        $existing | Add-Member -MemberType NoteProperty -Name 'LastRegionY'      -Value $Rect.Y      -Force
+        $existing | Add-Member -MemberType NoteProperty -Name 'LastRegionWidth'  -Value $Rect.Width  -Force
+        $existing | Add-Member -MemberType NoteProperty -Name 'LastRegionHeight' -Value $Rect.Height -Force
+        $existing | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+        $script:Config.LastRegionX      = $Rect.X
+        $script:Config.LastRegionY      = $Rect.Y
+        $script:Config.LastRegionWidth  = $Rect.Width
+        $script:Config.LastRegionHeight = $Rect.Height
+    }
+    catch {
+        Write-Warning "Could not save last region to config.json: $_"
+    }
+}
+
+function Get-ClampedLastRegion {
+    <#
+        Rebuilds a Rectangle from the saved LastRegion* config values, and
+        clamps it to fit the current virtual screen - the saved region may
+        have come from a since-changed monitor layout (a disconnected
+        second monitor, a resolution change), so it's re-fit rather than
+        trusted verbatim. Returns $null if nothing usable was saved yet.
+    #>
+    param($Config)
+    $w = [int]$Config.LastRegionWidth
+    $h = [int]$Config.LastRegionHeight
+    if ($w -lt 10 -or $h -lt 10) { return $null }
+
+    $x = [int]$Config.LastRegionX
+    $y = [int]$Config.LastRegionY
+
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $w = [Math]::Min($w, $vs.Width)
+    $h = [Math]::Min($h, $vs.Height)
+    $x = [Math]::Max($vs.X, [Math]::Min($x, $vs.X + $vs.Width  - $w))
+    $y = [Math]::Max($vs.Y, [Math]::Min($y, $vs.Y + $vs.Height - $h))
+
+    return New-Object System.Drawing.Rectangle $x, $y, $w, $h
+}
+
 # ---------------------------------------------------------------------------
 # Capture flash - a brief white flash over the captured rectangle so it's
 # obvious a screenshot was just taken. Uses a non-activating window so it
@@ -849,7 +921,16 @@ function Show-CaptureFlash {
 # ---------------------------------------------------------------------------
 Apply-Config
 
-$captureRect = Select-Region
+$lastRegion = Get-ClampedLastRegion -Config $script:Config
+if ($lastRegion) {
+    $msg = "Use the last capture region?`n`n$($lastRegion.Width) x $($lastRegion.Height) at ($($lastRegion.X), $($lastRegion.Y))`n`nYes = keep it as the starting point`nNo = pick a new region"
+    $keep = [System.Windows.Forms.MessageBox]::Show($msg, 'Region Screenshot Tool', 'YesNo', 'Question')
+    $captureRect = if ($keep -eq [System.Windows.Forms.DialogResult]::Yes) { $lastRegion } else { Select-Region }
+}
+else {
+    $captureRect = Select-Region
+}
+
 if (-not $captureRect) {
     [System.Windows.Forms.MessageBox]::Show(
         'No region selected. Exiting.', 'Region Screenshot Tool'
@@ -858,6 +939,7 @@ if (-not $captureRect) {
 }
 $script:captureRect = $captureRect
 Sync-RegionBorder
+Save-LastRegion -Rect $captureRect
 
 # ---------------------------------------------------------------------------
 # Tray icon + menu
@@ -888,6 +970,7 @@ $itemReselect.Add_Click({
     if ($newRect) {
         $script:captureRect = $newRect
         Sync-RegionBorder
+        Save-LastRegion -Rect $newRect
         $trayIcon.ShowBalloonTip(1500, 'Region Screenshot Tool', 'Capture region updated.', [System.Windows.Forms.ToolTipIcon]::Info)
     }
 })
@@ -1114,6 +1197,7 @@ function Invoke-CleanExit {
     if ($script:autoCaptureTimer.Enabled) {
         Stop-AutoCapture
     }
+    if ($script:captureRect) { Save-LastRegion -Rect $script:captureRect }
     $trayIcon.Visible = $false
     $pollTimer.Stop()
     $script:autoCaptureTimer.Stop()
@@ -1195,24 +1279,72 @@ $pollTimer.Add_Tick({
     }
     $script:hotkeyWasDown = $allDown
 
-    # Move/resize the region with modifier + arrow keys. Resize is checked
-    # first because its modifier combo often contains the move modifier
-    # plus an extra key (e.g. move = Ctrl+Alt, resize = Ctrl+Alt+Shift) -
-    # checking resize first means holding the resize combo doesn't also
-    # fire a move. Repeats every tick while held, so the region keeps
-    # sliding/growing smoothly for as long as the keys are down.
-    $step = [int]$script:Config.MoveResizeStepPixels
-    if (Test-HotkeyCombo -Codes $script:Config.ResizeModifierVKCodes) {
-        if (Test-HotkeyCombo -Codes @(39)) { Resize-CaptureRegion -DeltaWidth  $step -DeltaHeight 0 }      # Right
-        if (Test-HotkeyCombo -Codes @(37)) { Resize-CaptureRegion -DeltaWidth (-$step) -DeltaHeight 0 }     # Left
-        if (Test-HotkeyCombo -Codes @(40)) { Resize-CaptureRegion -DeltaWidth 0 -DeltaHeight  $step }       # Down
-        if (Test-HotkeyCombo -Codes @(38)) { Resize-CaptureRegion -DeltaWidth 0 -DeltaHeight (-$step) }     # Up
+    # Move/resize the region with modifier + arrow keys. A quick tap moves
+    # by FineStepPixels (1px by default) for precise nudging; holding the
+    # combo down past a short delay switches to repeating at
+    # MoveResizeStepPixels for fast bulk repositioning. Without this
+    # distinction every poll tick (60ms) applied a full MoveResizeStepPixels
+    # jump, so even a brief tap could move the region 10-20px at once -
+    # too coarse for lining an edge up precisely.
+    $fineStep   = [int]$script:Config.FineStepPixels
+    $coarseStep = [int]$script:Config.MoveResizeStepPixels
+    $repeatDelayMs    = 350
+    $repeatIntervalMs = 40
+
+    $activeMode = $null
+    if (Test-HotkeyCombo -Codes $script:Config.ResizeModifierVKCodes) { $activeMode = 'resize' }
+    elseif (Test-HotkeyCombo -Codes $script:Config.MoveModifierVKCodes) { $activeMode = 'move' }
+
+    $directions = [ordered]@{
+        Right = 39; Left = 37; Down = 40; Up = 38
     }
-    elseif (Test-HotkeyCombo -Codes $script:Config.MoveModifierVKCodes) {
-        if (Test-HotkeyCombo -Codes @(39)) { Move-CaptureRegion -DeltaX  $step -DeltaY 0 }   # Right
-        if (Test-HotkeyCombo -Codes @(37)) { Move-CaptureRegion -DeltaX (-$step) -DeltaY 0 } # Left
-        if (Test-HotkeyCombo -Codes @(40)) { Move-CaptureRegion -DeltaX 0 -DeltaY  $step }   # Down
-        if (Test-HotkeyCombo -Codes @(38)) { Move-CaptureRegion -DeltaX 0 -DeltaY (-$step) } # Up
+    if (-not $script:moveResizeHoldState) { $script:moveResizeHoldState = @{} }
+    $nowTicks = [Environment]::TickCount
+
+    foreach ($dirName in $directions.Keys) {
+        $key = "$activeMode`:$dirName"
+        $isDown = $activeMode -and (Test-HotkeyCombo -Codes @($directions[$dirName]))
+
+        if (-not $isDown) {
+            $script:moveResizeHoldState.Remove($key)
+            continue
+        }
+
+        $applyStep = $false
+        $stepSize = $fineStep
+
+        if (-not $script:moveResizeHoldState.ContainsKey($key)) {
+            # Fresh press (this direction/mode combo wasn't down last tick):
+            # apply one fine step immediately, and start tracking hold time.
+            $script:moveResizeHoldState[$key] = [PSCustomObject]@{ PressedAt = $nowTicks; LastStepAt = $nowTicks }
+            $applyStep = $true
+            $stepSize = $fineStep
+        }
+        else {
+            $state = $script:moveResizeHoldState[$key]
+            $heldMs = $nowTicks - $state.PressedAt
+            if ($heldMs -ge $repeatDelayMs) {
+                $sinceLastStepMs = $nowTicks - $state.LastStepAt
+                if ($sinceLastStepMs -ge $repeatIntervalMs) {
+                    $applyStep = $true
+                    $stepSize = $coarseStep
+                    $state.LastStepAt = $nowTicks
+                }
+            }
+        }
+
+        if ($applyStep) {
+            switch ("$activeMode`:$dirName") {
+                'resize:Right' { Resize-CaptureRegion -DeltaWidth  $stepSize -DeltaHeight 0 }
+                'resize:Left'  { Resize-CaptureRegion -DeltaWidth (-$stepSize) -DeltaHeight 0 }
+                'resize:Down'  { Resize-CaptureRegion -DeltaWidth 0 -DeltaHeight  $stepSize }
+                'resize:Up'    { Resize-CaptureRegion -DeltaWidth 0 -DeltaHeight (-$stepSize) }
+                'move:Right'   { Move-CaptureRegion -DeltaX  $stepSize -DeltaY 0 }
+                'move:Left'    { Move-CaptureRegion -DeltaX (-$stepSize) -DeltaY 0 }
+                'move:Down'    { Move-CaptureRegion -DeltaX 0 -DeltaY  $stepSize }
+                'move:Up'      { Move-CaptureRegion -DeltaX 0 -DeltaY (-$stepSize) }
+            }
+        }
     }
 })
 $pollTimer.Start()

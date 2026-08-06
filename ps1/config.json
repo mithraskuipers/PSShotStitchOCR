@@ -48,5 +48,10 @@
     "AutoCaptureUseSessionFolders": true,
     "AutoCaptureSessionFolderScheme": "Session_{date}_{time}",
     "AutoLaunchReviewOnStop": true,
-    "AutoCaptureIntervalMs": 5000
+    "AutoCaptureIntervalMs": 5000,
+    "FineStepPixels": 1,
+    "LastRegionX": 0,
+    "LastRegionY": 0,
+    "LastRegionWidth": 0,
+    "LastRegionHeight": 0
 }
