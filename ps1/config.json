@@ -1,57 +1,59 @@
 ﻿{
-    "HotkeyName": "Alt + S",
-    "HotkeyVKCodes": [
-        18,
-        83
-    ],
-    "ClipboardHotkeyName": "Ctrl + Shift + Alt + S",
-    "ClipboardHotkeyVKCodes": [
-        17,
-        16,
-        18,
-        83
-    ],
-    "StopHotkeyName": "Alt + Q",
-    "StopHotkeyVKCodes": [
-        18,
-        81
-    ],
-    "ToggleBorderHotkeyName": "Alt + H",
-    "ToggleBorderHotkeyVKCodes": [
-        18,
-        72
-    ],
-    "ToggleAutoCaptureHotkeyName": "Alt + A",
-    "ToggleAutoCaptureHotkeyVKCodes": [
-        18,
-        65
-    ],
-    "MoveModifierName": "Ctrl + Alt",
-    "MoveModifierVKCodes": [
-        17,
-        18
-    ],
-    "ResizeModifierName": "Ctrl + Alt + Shift",
-    "ResizeModifierVKCodes": [
-        17,
-        18,
-        16
-    ],
-    "MoveResizeStepPixels": 10,
-    "SaveLocation": "screenshots",
-    "FileNameScheme": "screenshot_{timestamp}",
-    "AutoCaptureAutoStart": false,
-    "AutoActionKeyName": "",
-    "AutoActionVKCodes": [],
-    "AutoActionTiming": "Before",
-    "AutoActionDelayMs": 150,
-    "AutoCaptureUseSessionFolders": true,
-    "AutoCaptureSessionFolderScheme": "Session_{date}_{time}",
-    "AutoLaunchReviewOnStop": true,
-    "AutoCaptureIntervalMs": 5000,
-    "FineStepPixels": 1,
-    "LastRegionX": 0,
-    "LastRegionY": 0,
-    "LastRegionWidth": 0,
-    "LastRegionHeight": 0
+    "HotkeyName":  "Alt + S",
+    "HotkeyVKCodes":  [
+                          18,
+                          83
+                      ],
+    "ClipboardHotkeyName":  "Ctrl + Shift + Alt + S",
+    "ClipboardHotkeyVKCodes":  [
+                                   17,
+                                   16,
+                                   18,
+                                   83
+                               ],
+    "StopHotkeyName":  "Alt + Q",
+    "StopHotkeyVKCodes":  [
+                              18,
+                              81
+                          ],
+    "ToggleBorderHotkeyName":  "Alt + H",
+    "ToggleBorderHotkeyVKCodes":  [
+                                      18,
+                                      72
+                                  ],
+    "ToggleAutoCaptureHotkeyName":  "Alt + A",
+    "ToggleAutoCaptureHotkeyVKCodes":  [
+                                           18,
+                                           65
+                                       ],
+    "MoveModifierName":  "Ctrl + Alt",
+    "MoveModifierVKCodes":  [
+                                17,
+                                18
+                            ],
+    "ResizeModifierName":  "Ctrl + Alt + Shift",
+    "ResizeModifierVKCodes":  [
+                                  17,
+                                  18,
+                                  16
+                              ],
+    "MoveResizeStepPixels":  10,
+    "SaveLocation":  "screenshots",
+    "FileNameScheme":  "screenshot_{timestamp}",
+    "AutoCaptureAutoStart":  false,
+    "AutoActionKeyName":  "",
+    "AutoActionVKCodes":  [
+
+                          ],
+    "AutoActionTiming":  "Before",
+    "AutoActionDelayMs":  150,
+    "AutoCaptureUseSessionFolders":  true,
+    "AutoCaptureSessionFolderScheme":  "Session_{date}_{time}",
+    "AutoLaunchReviewOnStop":  true,
+    "AutoCaptureIntervalMs":  5000,
+    "FineStepPixels":  1,
+    "LastRegionX":  1417,
+    "LastRegionY":  665,
+    "LastRegionWidth":  1481,
+    "LastRegionHeight":  716
 }

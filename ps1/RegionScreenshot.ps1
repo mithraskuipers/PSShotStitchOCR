@@ -1057,6 +1057,14 @@ $script:autoCaptureTimer.Add_Tick({
 $script:currentSessionFolder = $null
 $script:lastSessionFolder    = $null
 
+# Folder that plain Alt+S captures (i.e. no auto-capture session active)
+# have been landing in during this run, if any. Manual captures don't get
+# their own session folder, but the stop hotkey / Exit still need to know
+# where to point Review & Stitch at, since Start_All.bat promises capture,
+# review, and stitch all happen without running anything else by hand -
+# that hand-off shouldn't only work when auto-capture was used.
+$script:manualShotFolder = $null
+
 function Start-ReviewTool {
     <#
         Launches Start-ReviewWebServer.ps1 as its own process, pointed at
@@ -1067,12 +1075,23 @@ function Start-ReviewTool {
         so this runs independently of this tool's own message loop exactly
         like the old review app did.
 
-        The child process's console output is redirected to a log file
-        (not shown in a window) so a crash on launch leaves something to
-        look at instead of just a Windows "Application Error" popup. If the
-        process exits within moments of starting - the signature of a
-        launch-time crash rather than the server actually running - this
-        retries once before giving up.
+        IMPORTANT: this is launched via WMI (Win32_Process.Create), not
+        Start-Process. Start-Process creates the child as a normal child
+        process of this script's own console, and modern Windows consoles
+        (Windows Terminal, and recent conhost builds too) run under a Job
+        Object with "kill all processes when the job's last handle closes"
+        - which is exactly what happens moments later when Invoke-CleanExit
+        exits this tool. Whether the child survives that came down to a
+        timing race (had it fully detached yet?), which is why the hand-off
+        to Review & Stitch worked "most of the time" instead of reliably.
+        A process created via WMI is owned by the WMI provider host, not
+        this process's job, so it survives this tool exiting no matter the
+        timing.
+
+        Success is confirmed via a ready-marker file Start-ReviewWebServer
+        writes once its HTTP listener is actually up (rather than guessing
+        from a fixed timeout), and any startup crash is captured in the log
+        file that script writes via -LogPath.
     #>
     param([string]$SourceFolder)
 
@@ -1082,39 +1101,44 @@ function Start-ReviewTool {
         return
     }
 
-    # Manually quote the path arguments - Windows PowerShell 5.1's
-    # Start-Process -ArgumentList joins array elements with a plain space
-    # and does not auto-quote ones that contain spaces (unlike .NET's
-    # newer ArgumentList property), so a path like "C:\My Screenshots"
-    # would otherwise be split into two arguments.
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$reviewScript`"")
-    if ($SourceFolder) { $argList += @('-SourceFolder', "`"$SourceFolder`"") }
-
     $logDir = Join-Path $env:TEMP 'ShotStitcherReviewServer'
     New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+    $logPath = Join-Path $logDir "launch_${stamp}.log"
+    $readyPath = "$logPath.ready"
 
-    function _tryLaunch {
-        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-        $outLog = Join-Path $logDir "launch_${stamp}_out.log"
-        $errLog = Join-Path $logDir "launch_${stamp}_err.log"
-        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
-            -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
-        # A launch-time crash (e.g. the 0xc0000142 "unable to start correctly"
-        # case) exits within milliseconds; the server itself runs
-        # indefinitely once actually up, so a brief wait tells them apart.
-        Start-Sleep -Milliseconds 900
-        return @{ Process = $proc; OutLog = $outLog; ErrLog = $errLog }
-    }
+    # Win32_Process.Create takes one literal command line, not an argument
+    # array - build it with standard Windows quoting (each arg individually
+    # double-quoted; PowerShell's own executable, script and folder paths
+    # can all contain spaces).
+    $cmdLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$reviewScript`" -LogPath `"$logPath`""
+    if ($SourceFolder) { $cmdLine += " -SourceFolder `"$SourceFolder`"" }
 
     try {
-        $attempt = _tryLaunch
-        if ($attempt.Process.HasExited) {
-            Start-Sleep -Milliseconds 300
-            $attempt = _tryLaunch
-        }
-        if ($attempt.Process.HasExited) {
+        $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine }
+        if ($result.ReturnValue -ne 0) {
             $trayIcon.ShowBalloonTip(3000, 'Region Screenshot Tool',
-                "Review & Stitch failed to start twice (exit code $($attempt.Process.ExitCode)). Log: $($attempt.ErrLog)",
+                "Review & Stitch failed to start (WMI error $($result.ReturnValue)).",
+                [System.Windows.Forms.ToolTipIcon]::Warning)
+            return
+        }
+
+        # Poll for the ready-marker instead of guessing from a fixed sleep -
+        # the server can legitimately take a bit longer under load, and
+        # that shouldn't be mistaken for a crash.
+        $deadline = (Get-Date).AddSeconds(6)
+        $ready = $false
+        while ((Get-Date) -lt $deadline) {
+            if (Test-Path -LiteralPath $readyPath) { $ready = $true; break }
+            $stillRunning = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($result.ProcessId)" -ErrorAction SilentlyContinue
+            if (-not $stillRunning) { break }
+            Start-Sleep -Milliseconds 150
+        }
+
+        if (-not $ready) {
+            $logTail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Raw) } else { '(no log written)' }
+            $trayIcon.ShowBalloonTip(4000, 'Region Screenshot Tool',
+                "Review & Stitch didn't start. Log: $logPath",
                 [System.Windows.Forms.ToolTipIcon]::Warning)
         }
     }
@@ -1149,6 +1173,7 @@ function Stop-AutoCapture {
 
     $finishedSession = $script:currentSessionFolder
     $script:currentSessionFolder = $null
+    $script:manualShotFolder = $null
 
     if ($finishedSession) {
         $script:lastSessionFolder = $finishedSession
@@ -1197,12 +1222,30 @@ function Invoke-CleanExit {
     if ($script:autoCaptureTimer.Enabled) {
         Stop-AutoCapture
     }
+    elseif ($script:manualShotFolder -and $script:Config.AutoLaunchReviewOnStop) {
+        # No auto-capture session was running, but Alt+S captures were
+        # taken this run - Start_All.bat's whole pitch is that you don't
+        # need to run anything else by hand, so those need the same
+        # hand-off Stop-AutoCapture gives a real session.
+        $shotCount = @(Get-ChildItem -LiteralPath $script:manualShotFolder -File -ErrorAction SilentlyContinue |
+            Where-Object { @('.png', '.bmp') -contains $_.Extension.ToLowerInvariant() }).Count
+        if ($shotCount -gt 0) {
+            $trayIcon.ShowBalloonTip(1200, 'Region Screenshot Tool', "$shotCount screenshot(s) captured. Opening review...", [System.Windows.Forms.ToolTipIcon]::Info)
+            Start-ReviewTool -SourceFolder $script:manualShotFolder
+        }
+    }
     if ($script:captureRect) { Save-LastRegion -Rect $script:captureRect }
-    $trayIcon.Visible = $false
     $pollTimer.Stop()
     $script:autoCaptureTimer.Stop()
     Hide-CaptureFlash
     Remove-RegionBorder
+    # Tray icon is hidden last, and only after the balloon calls above have
+    # had a moment to actually render - hiding/destroying the NotifyIcon
+    # immediately after ShowBalloonTip can dismiss the balloon before it's
+    # ever drawn, which made review hand-off (or a launch failure) look
+    # like it silently did nothing even when it had, in fact, fired.
+    Start-Sleep -Milliseconds 200
+    $trayIcon.Visible = $false
     [System.Windows.Forms.Application]::Exit()
 }
 
@@ -1274,6 +1317,12 @@ $pollTimer.Add_Tick({
     $allDown = Test-HotkeyCombo -Codes $script:Config.HotkeyVKCodes
     if ($allDown -and -not $clipboardDown -and -not $script:hotkeyWasDown) {
         $path = Save-RegionScreenshot -Rect $script:captureRect
+        # Only tracked when there's no active auto-capture session - those
+        # already have their own folder via $script:currentSessionFolder,
+        # this is purely for the "just pressed Alt+S a few times" case.
+        if (-not $script:currentSessionFolder) {
+            $script:manualShotFolder = Split-Path -Path $path -Parent
+        }
         Show-CaptureFlash -Rect $script:captureRect
         $trayIcon.ShowBalloonTip(1200, 'Screenshot Saved', (Split-Path $path -Leaf), [System.Windows.Forms.ToolTipIcon]::Info)
     }

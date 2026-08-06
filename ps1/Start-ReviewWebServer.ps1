@@ -18,16 +18,30 @@ Usage:
 
 param(
     [string]$SourceFolder,
-    [int]$Port = 0
+    [int]$Port = 0,
+    # When set, any startup/runtime error is also appended here. Used when
+    # this script is launched headlessly (no console the user will see) so
+    # a failure has somewhere to go other than a Write-Host nobody reads.
+    [string]$LogPath
 )
 
+function Write-Log {
+    param([string]$Message)
+    try { Write-Host $Message } catch { }
+    if ($LogPath) {
+        try { Add-Content -LiteralPath $LogPath -Value $Message -Encoding UTF8 } catch { }
+    }
+}
+
 $ErrorActionPreference = 'Stop'
+try {
+
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WebAppRoot = Join-Path $ScriptRoot 'webapp'
 
 if (-not (Test-Path -LiteralPath $WebAppRoot)) {
-    Write-Host "ERROR: webapp folder not found next to this script: $WebAppRoot" -ForegroundColor Red
-    if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to exit' }
+    Write-Log "ERROR: webapp folder not found next to this script: $WebAppRoot"
+    if (-not $LogPath -and $Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to exit' }
     exit 1
 }
 
@@ -36,15 +50,15 @@ if (-not $SourceFolder) {
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
     $dlg.Description = 'Choose the screenshot session folder to review'
     if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
-        Write-Host 'No folder chosen - exiting.'
+        Write-Log 'No folder chosen - exiting.'
         exit 0
     }
     $SourceFolder = $dlg.SelectedPath
 }
 
 if (-not (Test-Path -LiteralPath $SourceFolder)) {
-    Write-Host "ERROR: source folder not found: $SourceFolder" -ForegroundColor Red
-    if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to exit' }
+    Write-Log "ERROR: source folder not found: $SourceFolder"
+    if (-not $LogPath -and $Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to exit' }
     exit 1
 }
 
@@ -115,10 +129,17 @@ $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$Port/")
 $listener.Start()
 
+# Written only once the listener is genuinely up - the launcher polls for
+# this instead of guessing from a fixed timeout, which is what made the
+# old "wait 900ms and hope" check flaky under load.
+if ($LogPath) {
+    try { Set-Content -LiteralPath "$LogPath.ready" -Value $Port -Encoding ASCII } catch { }
+}
+
 $url = "http://localhost:$Port/"
-Write-Host "Serving Screenshot Stitcher at $url"
-Write-Host "Session folder: $SourceFolder"
-Write-Host 'Press Ctrl+C here (or click Close in the browser) to stop.'
+Write-Log "Serving Screenshot Stitcher at $url"
+Write-Log "Session folder: $SourceFolder"
+Write-Log 'Press Ctrl+C here (or click Close in the browser) to stop.'
 
 function Open-DefaultBrowser {
     <#
@@ -251,4 +272,11 @@ while ($running -and $listener.IsListening) {
 
 $listener.Stop()
 $listener.Close()
-Write-Host 'Server stopped.'
+Write-Log 'Server stopped.'
+
+}
+catch {
+    Write-Log "FATAL: $($_.Exception.Message)"
+    Write-Log "$($_.ScriptStackTrace)"
+    exit 1
+}
