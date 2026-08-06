@@ -5,8 +5,9 @@
 .DESCRIPTION
     On startup, lets you drag out a rectangle on your screen(s) to define a
     capture region. Once selected, the tool sits in the system tray and
-    listens for a capture hotkey (which can be a combo of up to 4 keys,
-    e.g. Ctrl+Shift+S) and a separate stop hotkey (default Ctrl+Shift+Q)
+    listens for a capture hotkey (which can be a combo of up to 4 keys
+    and/or mouse buttons - side buttons, middle-click, etc. - e.g.
+    Ctrl+Shift+S) and a separate stop hotkey (default Ctrl+Shift+Q)
     that shuts the tool down cleanly. Both are detected system-wide, so
     they work even when this tool's window isn't focused - you can be
     typing in another app and still trigger a capture or stop the tool.

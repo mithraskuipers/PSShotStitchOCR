@@ -228,7 +228,7 @@ $y = 15
 
 # --- Hotkey (combo of up to 4 keys) ---
 $lblHotkey = New-Object System.Windows.Forms.Label
-$lblHotkey.Text = 'Capture hotkey (click the box, then hold up to 4 keys):'
+$lblHotkey.Text = 'Capture hotkey (click the box, then hold up to 4 keys/mouse buttons):'
 $lblHotkey.AutoSize = $true
 $lblHotkey.Location = New-Object System.Drawing.Point(15, $y)
 $form.Controls.Add($lblHotkey)
@@ -245,12 +245,21 @@ function Get-KeyNameFromVK([int]$vk) {
     # Map common modifier/control keys to short, friendly names so the
     # resulting "Ctrl + Shift + S" style string stays well under the
     # 63-character limit that Windows enforces on NotifyIcon.Text.
+    # VK codes 1/2/4/5/6 are the standard Windows mouse-button virtual
+    # keys (left/right/middle/X1/X2) - GetAsyncKeyState recognizes these
+    # exactly like keyboard keys, so mouse buttons can be bound the same
+    # way as any other key in a combo.
     switch ($vk) {
         16 { return 'Shift' }   # ShiftKey
         17 { return 'Ctrl' }    # ControlKey
         18 { return 'Alt' }     # Menu
         91 { return 'Win' }     # LWin
         92 { return 'Win' }     # RWin
+        1  { return 'Mouse Left' }     # VK_LBUTTON
+        2  { return 'Mouse Right' }    # VK_RBUTTON
+        4  { return 'Mouse Middle' }   # VK_MBUTTON
+        5  { return 'Mouse Back' }     # VK_XBUTTON1 (side button)
+        6  { return 'Mouse Forward' }  # VK_XBUTTON2 (side button)
         default {
             try {
                 $name = ([System.Windows.Forms.Keys]$vk).ToString()
@@ -261,6 +270,24 @@ function Get-KeyNameFromVK([int]$vk) {
             }
             catch { return "VK$vk" }
         }
+    }
+}
+
+# Maps a WinForms mouse button to the matching Windows virtual-key code, or
+# 0 if it's not one we let people bind. Left is deliberately excluded -
+# it's needed to click into the box in the first place, so it can never be
+# captured as part of a combo. Mice with more than five buttons (extra
+# buttons beyond Left/Right/Middle/Back/Forward, e.g. a DPI switch) don't
+# have standard Windows virtual-key codes for those extra buttons; such
+# buttons are usually remapped to a keyboard key by the mouse's own driver
+# software, in which case they're captured here as that keyboard key instead.
+function Get-MouseVKFromButton([System.Windows.Forms.MouseButtons]$Button) {
+    switch ($Button) {
+        ([System.Windows.Forms.MouseButtons]::Right)    { return 2 }
+        ([System.Windows.Forms.MouseButtons]::Middle)   { return 4 }
+        ([System.Windows.Forms.MouseButtons]::XButton1) { return 5 }
+        ([System.Windows.Forms.MouseButtons]::XButton2) { return 6 }
+        default { return 0 }
     }
 }
 
@@ -297,10 +324,30 @@ $txtHotkey.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:downKeys.Remove($vk)
 })
+$txtHotkey.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:downKeys.Count -eq 0) {
+        $script:comboVKCodes = @()
+    }
+    if (-not $script:downKeys.Contains($vk)) {
+        $script:downKeys.Add($vk)
+    }
+    if (($script:comboVKCodes -notcontains $vk) -and ($script:comboVKCodes.Count -lt 4)) {
+        $script:comboVKCodes += $vk
+    }
+    Update-HotkeyDisplay
+})
+$txtHotkey.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:downKeys.Remove($vk) }
+})
 $form.Controls.Add($txtHotkey)
 
 $lblHotkeyHint = New-Object System.Windows.Forms.Label
-$lblHotkeyHint.Text = "Hold keys together, e.g. Ctrl+Shift+F9."
+$lblHotkeyHint.Text = "Hold keys together, e.g. Ctrl+Shift+F9. Side/middle mouse buttons work too."
 $lblHotkeyHint.AutoSize = $true
 $lblHotkeyHint.ForeColor = [System.Drawing.Color]::Gray
 $lblHotkeyHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -353,10 +400,30 @@ $txtClipboardHotkey.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:clipboardDownKeys.Remove($vk)
 })
+$txtClipboardHotkey.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:clipboardDownKeys.Count -eq 0) {
+        $script:clipboardComboVKCodes = @()
+    }
+    if (-not $script:clipboardDownKeys.Contains($vk)) {
+        $script:clipboardDownKeys.Add($vk)
+    }
+    if (($script:clipboardComboVKCodes -notcontains $vk) -and ($script:clipboardComboVKCodes.Count -lt 4)) {
+        $script:clipboardComboVKCodes += $vk
+    }
+    Update-ClipboardHotkeyDisplay
+})
+$txtClipboardHotkey.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:clipboardDownKeys.Remove($vk) }
+})
 $form.Controls.Add($txtClipboardHotkey)
 
 $lblClipboardHotkeyHint = New-Object System.Windows.Forms.Label
-$lblClipboardHotkeyHint.Text = "e.g. Ctrl+Shift+Alt+S. No file is written to disk."
+$lblClipboardHotkeyHint.Text = "e.g. Ctrl+Shift+Alt+S. No file is written to disk. Side/middle mouse buttons work too."
 $lblClipboardHotkeyHint.AutoSize = $true
 $lblClipboardHotkeyHint.ForeColor = [System.Drawing.Color]::Gray
 $lblClipboardHotkeyHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -365,7 +432,7 @@ $y += 40
 
 # --- Stop hotkey (combo of up to 4 keys) ---
 $lblStopHotkey = New-Object System.Windows.Forms.Label
-$lblStopHotkey.Text = 'Stop hotkey (click the box, then hold up to 4 keys):'
+$lblStopHotkey.Text = 'Stop hotkey (click the box, then hold up to 4 keys/mouse buttons):'
 $lblStopHotkey.AutoSize = $true
 $lblStopHotkey.Location = New-Object System.Drawing.Point(15, $y)
 $form.Controls.Add($lblStopHotkey)
@@ -409,10 +476,30 @@ $txtStopHotkey.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:stopDownKeys.Remove($vk)
 })
+$txtStopHotkey.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:stopDownKeys.Count -eq 0) {
+        $script:stopComboVKCodes = @()
+    }
+    if (-not $script:stopDownKeys.Contains($vk)) {
+        $script:stopDownKeys.Add($vk)
+    }
+    if (($script:stopComboVKCodes -notcontains $vk) -and ($script:stopComboVKCodes.Count -lt 4)) {
+        $script:stopComboVKCodes += $vk
+    }
+    Update-StopHotkeyDisplay
+})
+$txtStopHotkey.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:stopDownKeys.Remove($vk) }
+})
 $form.Controls.Add($txtStopHotkey)
 
 $lblStopHotkeyHint = New-Object System.Windows.Forms.Label
-$lblStopHotkeyHint.Text = "Quits the tool entirely (finishes/hands off any running auto-capture session first) - use instead of closing the window."
+$lblStopHotkeyHint.Text = "Quits the tool entirely (finishes/hands off any running auto-capture session first) - use instead of closing the window. Side/middle mouse buttons work too."
 $lblStopHotkeyHint.AutoSize = $true
 $lblStopHotkeyHint.ForeColor = [System.Drawing.Color]::Gray
 $lblStopHotkeyHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -421,7 +508,7 @@ $y += 40
 
 # --- Toggle border hotkey (combo of up to 4 keys) ---
 $lblToggleHotkey = New-Object System.Windows.Forms.Label
-$lblToggleHotkey.Text = 'Show/hide region border hotkey (click the box, then hold up to 4 keys):'
+$lblToggleHotkey.Text = 'Show/hide region border hotkey (click the box, then hold up to 4 keys/mouse buttons):'
 $lblToggleHotkey.AutoSize = $true
 $lblToggleHotkey.Location = New-Object System.Drawing.Point(15, $y)
 $form.Controls.Add($lblToggleHotkey)
@@ -465,10 +552,30 @@ $txtToggleHotkey.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:toggleDownKeys.Remove($vk)
 })
+$txtToggleHotkey.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:toggleDownKeys.Count -eq 0) {
+        $script:toggleComboVKCodes = @()
+    }
+    if (-not $script:toggleDownKeys.Contains($vk)) {
+        $script:toggleDownKeys.Add($vk)
+    }
+    if (($script:toggleComboVKCodes -notcontains $vk) -and ($script:toggleComboVKCodes.Count -lt 4)) {
+        $script:toggleComboVKCodes += $vk
+    }
+    Update-ToggleHotkeyDisplay
+})
+$txtToggleHotkey.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:toggleDownKeys.Remove($vk) }
+})
 $form.Controls.Add($txtToggleHotkey)
 
 $lblToggleHotkeyHint = New-Object System.Windows.Forms.Label
-$lblToggleHotkeyHint.Text = "Shows or hides the red region outline. Default: Ctrl+Shift+H."
+$lblToggleHotkeyHint.Text = "Shows or hides the red region outline. Default: Ctrl+Shift+H. Side/middle mouse buttons work too."
 $lblToggleHotkeyHint.AutoSize = $true
 $lblToggleHotkeyHint.ForeColor = [System.Drawing.Color]::Gray
 $lblToggleHotkeyHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -477,7 +584,7 @@ $y += 40
 
 # --- Toggle auto-capture hotkey (combo of up to 4 keys) ---
 $lblToggleAutoCaptureHotkey = New-Object System.Windows.Forms.Label
-$lblToggleAutoCaptureHotkey.Text = 'Start/stop auto-capture hotkey (click the box, then hold up to 4 keys):'
+$lblToggleAutoCaptureHotkey.Text = 'Start/stop auto-capture hotkey (click the box, then hold up to 4 keys/mouse buttons):'
 $lblToggleAutoCaptureHotkey.AutoSize = $true
 $lblToggleAutoCaptureHotkey.Location = New-Object System.Drawing.Point(15, $y)
 $form.Controls.Add($lblToggleAutoCaptureHotkey)
@@ -521,10 +628,30 @@ $txtToggleAutoCaptureHotkey.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:toggleAutoCaptureDownKeys.Remove($vk)
 })
+$txtToggleAutoCaptureHotkey.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:toggleAutoCaptureDownKeys.Count -eq 0) {
+        $script:toggleAutoCaptureComboVKCodes = @()
+    }
+    if (-not $script:toggleAutoCaptureDownKeys.Contains($vk)) {
+        $script:toggleAutoCaptureDownKeys.Add($vk)
+    }
+    if (($script:toggleAutoCaptureComboVKCodes -notcontains $vk) -and ($script:toggleAutoCaptureComboVKCodes.Count -lt 4)) {
+        $script:toggleAutoCaptureComboVKCodes += $vk
+    }
+    Update-ToggleAutoCaptureHotkeyDisplay
+})
+$txtToggleAutoCaptureHotkey.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:toggleAutoCaptureDownKeys.Remove($vk) }
+})
 $form.Controls.Add($txtToggleAutoCaptureHotkey)
 
 $lblToggleAutoCaptureHotkeyHint = New-Object System.Windows.Forms.Label
-$lblToggleAutoCaptureHotkeyHint.Text = "Starts/stops timed auto-capture (see below). Default: Ctrl+Shift+A."
+$lblToggleAutoCaptureHotkeyHint.Text = "Starts/stops timed auto-capture (see below). Default: Ctrl+Shift+A. Side/middle mouse buttons work too."
 $lblToggleAutoCaptureHotkeyHint.AutoSize = $true
 $lblToggleAutoCaptureHotkeyHint.ForeColor = [System.Drawing.Color]::Gray
 $lblToggleAutoCaptureHotkeyHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -533,7 +660,7 @@ $y += 40
 
 # --- Move-region modifier (combo of up to 4 keys, held + arrow keys) ---
 $lblMoveModifier = New-Object System.Windows.Forms.Label
-$lblMoveModifier.Text = 'Move region: hold this + an arrow key (click box, hold up to 4 keys):'
+$lblMoveModifier.Text = 'Move region: hold this + an arrow key (click box, hold up to 4 keys/mouse buttons):'
 $lblMoveModifier.AutoSize = $true
 $lblMoveModifier.Location = New-Object System.Drawing.Point(15, $y)
 $form.Controls.Add($lblMoveModifier)
@@ -577,10 +704,30 @@ $txtMoveModifier.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:moveDownKeys.Remove($vk)
 })
+$txtMoveModifier.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:moveDownKeys.Count -eq 0) {
+        $script:moveComboVKCodes = @()
+    }
+    if (-not $script:moveDownKeys.Contains($vk)) {
+        $script:moveDownKeys.Add($vk)
+    }
+    if (($script:moveComboVKCodes -notcontains $vk) -and ($script:moveComboVKCodes.Count -lt 4)) {
+        $script:moveComboVKCodes += $vk
+    }
+    Update-MoveModifierDisplay
+})
+$txtMoveModifier.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:moveDownKeys.Remove($vk) }
+})
 $form.Controls.Add($txtMoveModifier)
 
 $lblMoveModifierHint = New-Object System.Windows.Forms.Label
-$lblMoveModifierHint.Text = "e.g. hold Ctrl+Alt, then tap an arrow key to nudge the region."
+$lblMoveModifierHint.Text = "e.g. hold Ctrl+Alt, then tap an arrow key to nudge the region. Side/middle mouse buttons work too."
 $lblMoveModifierHint.AutoSize = $true
 $lblMoveModifierHint.ForeColor = [System.Drawing.Color]::Gray
 $lblMoveModifierHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -589,7 +736,7 @@ $y += 40
 
 # --- Resize-region modifier (combo of up to 4 keys, held + arrow keys) ---
 $lblResizeModifier = New-Object System.Windows.Forms.Label
-$lblResizeModifier.Text = 'Resize region: hold this + an arrow key (click box, hold up to 4 keys):'
+$lblResizeModifier.Text = 'Resize region: hold this + an arrow key (click box, hold up to 4 keys/mouse buttons):'
 $lblResizeModifier.AutoSize = $true
 $lblResizeModifier.Location = New-Object System.Drawing.Point(15, $y)
 $form.Controls.Add($lblResizeModifier)
@@ -633,10 +780,30 @@ $txtResizeModifier.Add_KeyUp({
     $vk = [int]$e.KeyValue
     [void]$script:resizeDownKeys.Remove($vk)
 })
+$txtResizeModifier.Add_MouseDown({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -eq 0) { return }
+    if ($script:resizeDownKeys.Count -eq 0) {
+        $script:resizeComboVKCodes = @()
+    }
+    if (-not $script:resizeDownKeys.Contains($vk)) {
+        $script:resizeDownKeys.Add($vk)
+    }
+    if (($script:resizeComboVKCodes -notcontains $vk) -and ($script:resizeComboVKCodes.Count -lt 4)) {
+        $script:resizeComboVKCodes += $vk
+    }
+    Update-ResizeModifierDisplay
+})
+$txtResizeModifier.Add_MouseUp({
+    param($s, $e)
+    $vk = Get-MouseVKFromButton -Button $e.Button
+    if ($vk -ne 0) { [void]$script:resizeDownKeys.Remove($vk) }
+})
 $form.Controls.Add($txtResizeModifier)
 
 $lblResizeModifierHint = New-Object System.Windows.Forms.Label
-$lblResizeModifierHint.Text = "e.g. hold Ctrl+Alt+Shift, then tap an arrow key to grow/shrink it."
+$lblResizeModifierHint.Text = "e.g. hold Ctrl+Alt+Shift, then tap an arrow key to grow/shrink it. Side/middle mouse buttons work too."
 $lblResizeModifierHint.AutoSize = $true
 $lblResizeModifierHint.ForeColor = [System.Drawing.Color]::Gray
 $lblResizeModifierHint.Location = New-Object System.Drawing.Point(325, ($y + 4))
@@ -757,7 +924,7 @@ $form.Controls.Add($grpAuto)
 
 # What key combination to auto-press.
 $lblActionKey = New-Object System.Windows.Forms.Label
-$lblActionKey.Text = 'Key combination to auto-press (optional - leave empty to disable):'
+$lblActionKey.Text = 'Key combination to auto-press - keyboard only (optional - leave empty to disable):'
 $lblActionKey.AutoSize = $true
 $lblActionKey.Location = New-Object System.Drawing.Point(15, 25)
 $grpAuto.Controls.Add($lblActionKey)
