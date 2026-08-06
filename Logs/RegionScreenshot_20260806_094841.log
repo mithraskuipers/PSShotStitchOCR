@@ -1,9 +1,0 @@
-﻿[2026-08-06 09:48:41] RegionScreenshot started. ProjectRoot=C:\Users\mkuipers\repos\PSShotStitchOCR  ConfigPath=C:\Users\mkuipers\repos\PSShotStitchOCR\ps1\config.json
-[2026-08-06 09:48:47] Auto-capture started. Interval=5000ms  SessionFolder=C:\Users\mkuipers\repos\PSShotStitchOCR\screenshots\Session_20260806_094847
-[2026-08-06 09:48:52] Captured screenshot -> C:\Users\mkuipers\repos\PSShotStitchOCR\screenshots\Session_20260806_094847\screenshot_20260806_094852_398.png (871x618)
-[2026-08-06 09:48:57] Captured screenshot -> C:\Users\mkuipers\repos\PSShotStitchOCR\screenshots\Session_20260806_094847\screenshot_20260806_094857_382.png (871x618)
-[2026-08-06 09:49:02] Captured screenshot -> C:\Users\mkuipers\repos\PSShotStitchOCR\screenshots\Session_20260806_094847\screenshot_20260806_094902_373.png (871x618)
-[2026-08-06 09:49:04] Auto-capture stopped. Session=C:\Users\mkuipers\repos\PSShotStitchOCR\screenshots\Session_20260806_094847  ShotCount=3  WillReview=True
-[2026-08-06 09:49:04] Launching Review & Stitch for folder: C:\Users\mkuipers\repos\PSShotStitchOCR\screenshots\Session_20260806_094847
-[2026-08-06 09:49:05] Review & Stitch started successfully. Log: C:\Users\mkuipers\repos\PSShotStitchOCR\Logs\ReviewWebServer_20260806_094904_467.log
-[2026-08-06 09:49:05] RegionScreenshot exiting.

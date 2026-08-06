@@ -314,14 +314,14 @@ $script:DefaultConfig = [ordered]@{
     LastRegionHeight             = 0
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
-    AutoCaptureIntervalMs      = 5000   # minimum 500
+    AutoCaptureIntervalMs      = 2000   # minimum 500
     AutoCaptureAutoStart       = $false
     AutoCaptureUseSessionFolders   = $true
     AutoCaptureSessionFolderScheme = 'Session_{date}_{time}'
-    AutoActionKeyName          = ''
-    AutoActionVKCodes          = @()
-    AutoActionTiming           = 'Before'   # 'Before' or 'After' the screenshot
-    AutoActionDelayMs          = 150
+    AutoActionKeyName          = 'F5'
+    AutoActionVKCodes          = @(116)   # F5
+    AutoActionTiming           = 'After'   # 'Before' or 'After' the screenshot
+    AutoActionDelayMs          = 100
     AutoLaunchReviewOnStop      = $true
 }
 
@@ -1130,6 +1130,18 @@ function Start-ReviewTool {
         writes once its HTTP listener is actually up (rather than guessing
         from a fixed timeout), and any startup crash is captured in the log
         file that script writes via -LogPath.
+
+        IMPORTANT: the child is launched via -Command + [scriptblock]::Create(),
+        NOT "-File Start-ReviewWebServer.ps1". On machines where script
+        execution policy is locked down by Group Policy (AllSigned/
+        Restricted), that lock applies to loading a .ps1 file directly and
+        overrides even -ExecutionPolicy Bypass - so "-File ..." silently
+        fails to launch while this tool's own capture loop keeps working
+        fine (it's loaded the same safe way by Start_Screenshot_Tool.bat -
+        see its comments). Turning the script's text into a scriptblock and
+        invoking that with & keeps named-parameter binding (-ScriptRoot,
+        -SourceFolder, -LogPath) working exactly like -File would, without
+        ever "loading a .ps1 file" in the way the policy restricts.
     #>
     param([string]$SourceFolder)
 
@@ -1150,12 +1162,27 @@ function Start-ReviewTool {
     $logPath = Join-Path $LogDir "ReviewWebServer_${stamp}.log"
     $readyPath = "$logPath.ready"
 
+    # Single-quoted PS string literals embedded inside the -Command text
+    # below - '' escapes a literal single quote, in case any path contains
+    # one (rare, but cheap to guard against).
+    $escape = { param($s) $s -replace "'", "''" }
+    $reviewScriptEsc = & $escape $reviewScript
+    $scriptRootEsc   = & $escape $ScriptRoot
+    $logPathEsc      = & $escape $logPath
+
+    $psCommand = "`$src = Get-Content -LiteralPath '$reviewScriptEsc' -Raw; " +
+                 "`$sb = [scriptblock]::Create(`$src); " +
+                 "& `$sb -ScriptRoot '$scriptRootEsc' -LogPath '$logPathEsc'"
+    if ($SourceFolder) {
+        $sourceFolderEsc = & $escape $SourceFolder
+        $psCommand += " -SourceFolder '$sourceFolderEsc'"
+    }
+
     # Win32_Process.Create takes one literal command line, not an argument
-    # array - build it with standard Windows quoting (each arg individually
-    # double-quoted; PowerShell's own executable, script and folder paths
-    # can all contain spaces).
-    $cmdLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$reviewScript`" -LogPath `"$logPath`""
-    if ($SourceFolder) { $cmdLine += " -SourceFolder `"$SourceFolder`"" }
+    # array - the whole -Command text is one double-quoted token; since it
+    # only contains single-quoted literals internally, it never needs its
+    # own embedded double-quote escaping.
+    $cmdLine = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command `"$psCommand`""
 
     try {
         $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine }

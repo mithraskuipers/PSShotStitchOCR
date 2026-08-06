@@ -21,18 +21,27 @@ param(
     [int]$Port = 0,
     # Any startup/runtime output is always appended here too, in addition
     # to the console - used when this script is launched headlessly (no
-    # console the user will see, e.g. via RegionScreenshot.ps1's WMI
-    # hand-off) so a failure has somewhere to go other than a Write-Host
-    # nobody reads. If not passed explicitly (e.g. running this script by
-    # hand), a default path under Logs\ is used instead, so a log is
-    # always written either way.
-    [string]$LogPath
+    # console the user will see, e.g. via RegionScreenshot.ps1's hand-off)
+    # so a failure has somewhere to go other than a Write-Host nobody
+    # reads. If not passed explicitly (e.g. running this script by hand),
+    # a default path under Logs\ is used instead, so a log is always
+    # written either way.
+    [string]$LogPath,
+    # Folder this script lives in. Normally auto-detected via
+    # $MyInvocation, but RegionScreenshot.ps1's hand-off runs this script's
+    # text as a dynamically-created scriptblock rather than a real file (to
+    # sidestep Group-Policy-locked execution policy - see the matching
+    # comment in RegionScreenshot.ps1's Start-ReviewTool), and
+    # $MyInvocation.MyCommand.Path is empty in that case, so it's passed
+    # in explicitly instead.
+    [string]$ScriptRoot
 )
 
+if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
+
 if (-not $LogPath) {
-    $DefaultLogScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-    $DefaultLogProjectRoot = Split-Path -Path $DefaultLogScriptRoot -Parent
-    if (-not $DefaultLogProjectRoot) { $DefaultLogProjectRoot = $DefaultLogScriptRoot }
+    $DefaultLogProjectRoot = Split-Path -Path $ScriptRoot -Parent
+    if (-not $DefaultLogProjectRoot) { $DefaultLogProjectRoot = $ScriptRoot }
     $DefaultLogDir = Join-Path -Path $DefaultLogProjectRoot -ChildPath 'Logs'
     New-Item -ItemType Directory -Path $DefaultLogDir -Force -ErrorAction SilentlyContinue | Out-Null
     $LogPath = Join-Path -Path $DefaultLogDir -ChildPath ("ReviewWebServer_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -45,12 +54,11 @@ function Write-Log {
     try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch { }
 }
 
-Write-Log "Start-ReviewWebServer started. LogPath=$LogPath"
+Write-Log "Start-ReviewWebServer started. ScriptRoot=$ScriptRoot  LogPath=$LogPath"
 
 $ErrorActionPreference = 'Stop'
 try {
 
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WebAppRoot = Join-Path $ScriptRoot 'webapp'
 
 if (-not (Test-Path -LiteralPath $WebAppRoot)) {

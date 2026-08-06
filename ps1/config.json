@@ -41,19 +41,19 @@
     "SaveLocation":  "screenshots",
     "FileNameScheme":  "screenshot_{timestamp}",
     "AutoCaptureAutoStart":  false,
-    "AutoActionKeyName":  "",
+    "AutoActionKeyName":  "F5",
     "AutoActionVKCodes":  [
-
+                              116
                           ],
-    "AutoActionTiming":  "Before",
-    "AutoActionDelayMs":  150,
+    "AutoActionTiming":  "After",
+    "AutoActionDelayMs":  100,
     "AutoCaptureUseSessionFolders":  true,
     "AutoCaptureSessionFolderScheme":  "Session_{date}_{time}",
     "AutoLaunchReviewOnStop":  true,
-    "AutoCaptureIntervalMs":  5000,
+    "AutoCaptureIntervalMs":  2000,
     "FineStepPixels":  1,
-    "LastRegionX":  689,
-    "LastRegionY":  210,
-    "LastRegionWidth":  871,
-    "LastRegionHeight":  618
+    "LastRegionX":  1417,
+    "LastRegionY":  665,
+    "LastRegionWidth":  1481,
+    "LastRegionHeight":  716
 }
