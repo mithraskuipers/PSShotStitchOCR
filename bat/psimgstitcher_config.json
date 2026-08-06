@@ -1,0 +1,18 @@
+﻿{
+    "RowSamples":  48,
+    "MinOverlapPixels":  15,
+    "MaxAvgError":  6,
+    "MaxOverlapSearchPixels":  0,
+    "MaxOutputHeightPixels":  18000,
+    "SortMode":  "Name",
+    "MinConfidence":  0.55,
+    "FeatherPixels":  6,
+    "SideMarginPercent":  0.03,
+    "MaxDiffPixelFraction":  0.12,
+    "MaxOverlapFraction":  0.96,
+    "DuplicateFrameMaxAvgError":  0.5,
+    "AmbiguityMinRatio":  2,
+    "OverlapSharpnessRatio":  0.4,
+    "LastSourceFolder":  "C:\\Users\\mkuipers\\repos\\PSShotStitchOCR\\screenshots\\Session_20260805_173928",
+    "LastOutputFolder":  "C:\\Users\\mkuipers\\repos\\PSShotStitchOCR\\stitched\\Session_20260805_173928"
+}

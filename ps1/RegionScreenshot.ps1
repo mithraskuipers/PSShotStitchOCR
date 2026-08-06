@@ -263,6 +263,32 @@ if (-not $ProjectRoot) { $ProjectRoot = $ScriptRoot }
 
 $ConfigPath = Join-Path -Path $ScriptRoot -ChildPath 'config.json'
 
+# ---------------------------------------------------------------------------
+# Logging - every run always writes a timestamped log file to Logs\ next to
+# ps1\, regardless of whether anything goes wrong, so past sessions can be
+# reviewed after the fact. Same Logs\ folder every tool in the pipeline
+# (Configure.ps1, PSImgStitcher.ps1, Start-ReviewWebServer.ps1) writes to.
+# ---------------------------------------------------------------------------
+$LogDir = Join-Path -Path $ProjectRoot -ChildPath 'Logs'
+New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
+$script:LogPath = Join-Path -Path $LogDir -ChildPath ("RegionScreenshot_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+function Write-Log {
+    param([Parameter(Mandatory)][string]$Message)
+    $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    try { Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 } catch { }
+}
+
+# Catches anything that would otherwise crash the tool silently (or with
+# just an unhandled-exception dialog) without a record of what happened.
+trap {
+    Write-Log "FATAL: $($_.Exception.Message)"
+    Write-Log $_.ScriptStackTrace
+    continue
+}
+
+Write-Log "RegionScreenshot started. ProjectRoot=$ProjectRoot  ConfigPath=$ConfigPath"
+
 # Built-in defaults, used for any setting missing from config.json.
 # VK codes: Ctrl=17, Shift=16, S=83, Q=81.
 $script:DefaultConfig = [ordered]@{
@@ -324,6 +350,7 @@ function Get-ToolConfig {
             }
         }
         catch {
+            Write-Log "ERROR: config.json could not be read, using defaults instead: $($_.Exception.Message)"
             [System.Windows.Forms.MessageBox]::Show(
                 "config.json could not be read (using defaults instead):`n$($_.Exception.Message)",
                 'Region Screenshot Tool', 'OK', 'Warning'
@@ -656,7 +683,12 @@ function Save-RegionScreenshot {
         $fileName = Expand-FileNameScheme -Scheme $script:Config.FileNameScheme
         $path = Join-Path -Path $Folder -ChildPath $fileName
         $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        Write-Log "Captured screenshot -> $path ($($Rect.Width)x$($Rect.Height))"
         return $path
+    }
+    catch {
+        Write-Log "ERROR: capture failed: $($_.Exception.Message)"
+        throw
     }
     finally {
         $graphics.Dispose()
@@ -685,6 +717,11 @@ function Copy-RegionScreenshotToClipboard {
     try {
         $graphics.CopyFromScreen($Rect.Location, [System.Drawing.Point]::Empty, $Rect.Size)
         [System.Windows.Forms.Clipboard]::SetImage($bmp)
+        Write-Log "Captured screenshot -> clipboard ($($Rect.Width)x$($Rect.Height))"
+    }
+    catch {
+        Write-Log "ERROR: clipboard capture failed: $($_.Exception.Message)"
+        throw
     }
     finally {
         $graphics.Dispose()
@@ -816,6 +853,7 @@ function Save-LastRegion {
     }
     catch {
         Write-Warning "Could not save last region to config.json: $_"
+        Write-Log "ERROR: could not save last region to config.json: $_"
     }
 }
 
@@ -1095,16 +1133,21 @@ function Start-ReviewTool {
     #>
     param([string]$SourceFolder)
 
+    Write-Log "Launching Review & Stitch for folder: $SourceFolder"
+
     $reviewScript = Join-Path -Path $ScriptRoot -ChildPath 'Start-ReviewWebServer.ps1'
     if (-not (Test-Path -LiteralPath $reviewScript)) {
+        Write-Log "ERROR: Start-ReviewWebServer.ps1 was not found next to this script."
         $trayIcon.ShowBalloonTip(2000, 'Region Screenshot Tool', 'Start-ReviewWebServer.ps1 was not found next to this script.', [System.Windows.Forms.ToolTipIcon]::Warning)
         return
     }
 
-    $logDir = Join-Path $env:TEMP 'ShotStitcherReviewServer'
-    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
+    # Written into the same Logs\ folder as everything else in the pipeline
+    # so the whole capture->review->stitch handoff can be traced from one
+    # place, even though this file is really Start-ReviewWebServer's own log
+    # (see -LogPath below) plus the ready-marker used to confirm it started.
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
-    $logPath = Join-Path $logDir "launch_${stamp}.log"
+    $logPath = Join-Path $LogDir "ReviewWebServer_${stamp}.log"
     $readyPath = "$logPath.ready"
 
     # Win32_Process.Create takes one literal command line, not an argument
@@ -1117,6 +1160,7 @@ function Start-ReviewTool {
     try {
         $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmdLine }
         if ($result.ReturnValue -ne 0) {
+            Write-Log "ERROR: Review & Stitch failed to start (WMI error $($result.ReturnValue))."
             $trayIcon.ShowBalloonTip(3000, 'Region Screenshot Tool',
                 "Review & Stitch failed to start (WMI error $($result.ReturnValue)).",
                 [System.Windows.Forms.ToolTipIcon]::Warning)
@@ -1135,14 +1179,19 @@ function Start-ReviewTool {
             Start-Sleep -Milliseconds 150
         }
 
-        if (-not $ready) {
+        if ($ready) {
+            Write-Log "Review & Stitch started successfully. Log: $logPath"
+        }
+        else {
             $logTail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Raw) } else { '(no log written)' }
+            Write-Log "ERROR: Review & Stitch didn't start. Log: $logPath"
             $trayIcon.ShowBalloonTip(4000, 'Region Screenshot Tool',
                 "Review & Stitch didn't start. Log: $logPath",
                 [System.Windows.Forms.ToolTipIcon]::Warning)
         }
     }
     catch {
+        Write-Log "ERROR: Couldn't launch Review & Stitch: $($_.Exception.Message)"
         $trayIcon.ShowBalloonTip(2000, 'Region Screenshot Tool', "Couldn't launch Review & Stitch: $($_.Exception.Message)", [System.Windows.Forms.ToolTipIcon]::Warning)
     }
 }
@@ -1165,6 +1214,7 @@ function Start-AutoCapture {
     $script:autoCaptureTimer.Start()
     $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
     $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Started', "Capturing every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs).", [System.Windows.Forms.ToolTipIcon]::Info)
+    Write-Log "Auto-capture started. Interval=$($script:Config.AutoCaptureIntervalMs)ms  SessionFolder=$($script:currentSessionFolder)"
 }
 
 function Stop-AutoCapture {
@@ -1183,12 +1233,14 @@ function Stop-AutoCapture {
         $willReview = $shotCount -gt 0 -and $script:Config.AutoLaunchReviewOnStop
         $statusMsg = if ($willReview) { "$shotCount screenshot(s) captured. Opening review..." } else { "$shotCount screenshot(s) captured." }
         $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', $statusMsg, [System.Windows.Forms.ToolTipIcon]::Info)
+        Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=$willReview"
         if ($willReview) {
             Start-ReviewTool -SourceFolder $finishedSession
         }
     }
     else {
         $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', 'Automatic capturing has been stopped.', [System.Windows.Forms.ToolTipIcon]::Info)
+        Write-Log "Auto-capture stopped. No session folder was active."
     }
 }
 
@@ -1239,6 +1291,7 @@ function Invoke-CleanExit {
     $script:autoCaptureTimer.Stop()
     Hide-CaptureFlash
     Remove-RegionBorder
+    Write-Log 'RegionScreenshot exiting.'
     # Tray icon is hidden last, and only after the balloon calls above have
     # had a moment to actually render - hiding/destroying the NotifyIcon
     # immediately after ShowBalloonTip can dismiss the balloon before it's

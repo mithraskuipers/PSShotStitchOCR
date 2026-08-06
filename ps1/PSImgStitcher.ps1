@@ -22,6 +22,11 @@ $ConfigPath = Join-Path $ScriptDir "psimgstitcher_config.json"
 $ProjectRoot = Split-Path -Path $ScriptDir -Parent
 if (-not $ProjectRoot) { $ProjectRoot = $ScriptDir }
 
+# Same Logs\ folder every tool in the pipeline writes to.
+$LogDir = Join-Path -Path $ProjectRoot -ChildPath 'Logs'
+New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
+$script:LogFilePath = Join-Path -Path $LogDir -ChildPath ("PSImgStitcher_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
 if (-not (Test-Path -LiteralPath $EnginePath)) {
     [System.Windows.Forms.MessageBox]::Show(
         "PSImgStitcherEngine.ps1 was not found next to this script:`n$EnginePath",
@@ -230,7 +235,17 @@ $logGroup.Controls.Add($logBox)
 
 function Write-Log([string]$msg) {
     $logBox.AppendText($msg + [Environment]::NewLine)
+    $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
+    try { Add-Content -LiteralPath $script:LogFilePath -Value $line -Encoding UTF8 } catch { }
 }
+
+trap {
+    Write-Log "FATAL: $($_.Exception.Message)"
+    Write-Log $_.ScriptStackTrace
+    continue
+}
+
+Write-Log "PSImgStitcher started. Log file: $script:LogFilePath"
 
 function Open-OutputFolder {
     $folder = $outputTextBox.Text
@@ -329,6 +344,8 @@ $runBtn.Add_Click({
     }
     Export-StitchConfigFile -Path $ConfigPath -Config $newCfg
 
+    Write-Log "Stitch started. Source: $source  Output: $output"
+
     $runBtn.Enabled = $false
     $stopBtn.Enabled = $true
     $progress.MarqueeAnimationSpeed = 30
@@ -374,6 +391,7 @@ $form.Add_FormClosing({
     catch {
         # settings textboxes may hold invalid values on close - ignore, keep last saved config
     }
+    Write-Log "PSImgStitcher exiting."
 })
 
 [System.Windows.Forms.Application]::Run($form)

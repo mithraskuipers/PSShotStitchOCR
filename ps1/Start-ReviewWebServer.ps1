@@ -19,19 +19,33 @@ Usage:
 param(
     [string]$SourceFolder,
     [int]$Port = 0,
-    # When set, any startup/runtime error is also appended here. Used when
-    # this script is launched headlessly (no console the user will see) so
-    # a failure has somewhere to go other than a Write-Host nobody reads.
+    # Any startup/runtime output is always appended here too, in addition
+    # to the console - used when this script is launched headlessly (no
+    # console the user will see, e.g. via RegionScreenshot.ps1's WMI
+    # hand-off) so a failure has somewhere to go other than a Write-Host
+    # nobody reads. If not passed explicitly (e.g. running this script by
+    # hand), a default path under Logs\ is used instead, so a log is
+    # always written either way.
     [string]$LogPath
 )
 
+if (-not $LogPath) {
+    $DefaultLogScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $DefaultLogProjectRoot = Split-Path -Path $DefaultLogScriptRoot -Parent
+    if (-not $DefaultLogProjectRoot) { $DefaultLogProjectRoot = $DefaultLogScriptRoot }
+    $DefaultLogDir = Join-Path -Path $DefaultLogProjectRoot -ChildPath 'Logs'
+    New-Item -ItemType Directory -Path $DefaultLogDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $LogPath = Join-Path -Path $DefaultLogDir -ChildPath ("ReviewWebServer_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+}
+
 function Write-Log {
     param([string]$Message)
+    $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
     try { Write-Host $Message } catch { }
-    if ($LogPath) {
-        try { Add-Content -LiteralPath $LogPath -Value $Message -Encoding UTF8 } catch { }
-    }
+    try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch { }
 }
+
+Write-Log "Start-ReviewWebServer started. LogPath=$LogPath"
 
 $ErrorActionPreference = 'Stop'
 try {

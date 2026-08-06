@@ -39,6 +39,26 @@ if (-not $ProjectRoot) { $ProjectRoot = $ScriptRoot }
 
 $ConfigPath = Join-Path -Path $ScriptRoot -ChildPath 'config.json'
 
+# Same Logs\ folder every tool in the pipeline writes to, so a settings
+# change can be traced alongside what RegionScreenshot/PSImgStitcher did.
+$LogDir = Join-Path -Path $ProjectRoot -ChildPath 'Logs'
+New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
+$script:LogPath = Join-Path -Path $LogDir -ChildPath ("Configure_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+function Write-Log {
+    param([Parameter(Mandatory)][string]$Message)
+    $line = "[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    try { Add-Content -LiteralPath $script:LogPath -Value $line -Encoding UTF8 } catch { }
+}
+
+trap {
+    Write-Log "FATAL: $($_.Exception.Message)"
+    Write-Log $_.ScriptStackTrace
+    continue
+}
+
+Write-Log "Configure started. ConfigPath=$ConfigPath"
+
 # VK codes: Ctrl=17, Shift=16, S=83, Q=81.
 $Defaults = [ordered]@{
     HotkeyName                 = 'Ctrl + Shift + S'
@@ -980,6 +1000,7 @@ $btnSave.Add_Click({
     if (-not (Test-Path -LiteralPath $txtSave.Text)) {
         try { New-Item -ItemType Directory -Path $txtSave.Text -Force | Out-Null }
         catch {
+            Write-Log "ERROR: couldn't create save folder '$($txtSave.Text)': $($_.Exception.Message)"
             [System.Windows.Forms.MessageBox]::Show("Couldn't create that folder:`n$($_.Exception.Message)", 'Region Screenshot Tool') | Out-Null
             return
         }
@@ -1018,7 +1039,15 @@ $btnSave.Add_Click({
         LastRegionWidth              = [int]$current.LastRegionWidth
         LastRegionHeight             = [int]$current.LastRegionHeight
     }
-    $toSave | ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    try {
+        $toSave | ConvertTo-Json | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+        Write-Log "Settings saved to $ConfigPath"
+    }
+    catch {
+        Write-Log "ERROR: couldn't save settings to '$ConfigPath': $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Couldn't save settings:`n$($_.Exception.Message)", 'Region Screenshot Tool') | Out-Null
+        return
+    }
 
     [System.Windows.Forms.MessageBox]::Show(
         "Settings saved.`n`nIf the screenshot tool is already running, use its tray icon's `"Reload Config`" option to apply these changes.",
