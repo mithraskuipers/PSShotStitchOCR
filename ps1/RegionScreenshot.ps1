@@ -314,12 +314,12 @@ $script:DefaultConfig = [ordered]@{
     LastRegionHeight             = 0
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
-    AutoCaptureIntervalMs      = 2000   # minimum 500
+    AutoCaptureIntervalMs      = 1000   # minimum 500
     AutoCaptureAutoStart       = $false
     AutoCaptureUseSessionFolders   = $true
     AutoCaptureSessionFolderScheme = 'Session_{date}_{time}'
-    AutoActionKeyName          = 'F5'
-    AutoActionVKCodes          = @(116)   # F5
+    AutoActionKeyName          = 'F8'
+    AutoActionVKCodes          = @(119)   # F8
     AutoActionTiming           = 'After'   # 'Before' or 'After' the screenshot
     AutoActionDelayMs          = 100
     AutoLaunchReviewOnStop      = $true
@@ -431,7 +431,7 @@ function Get-ToolConfig {
         [void][int]::TryParse([string]$loaded.AutoCaptureIntervalSeconds, [ref]$oldSeconds)
         if ($oldSeconds -gt 0) { $intervalMs = $oldSeconds * 1000 }
     }
-    if ($intervalMs -le 0) { $intervalMs = 5000 }
+    if ($intervalMs -le 0) { $intervalMs = 1000 }
     if ($intervalMs -lt 500) { $intervalMs = 500 }
     $cfg.AutoCaptureIntervalMs = $intervalMs
     $cfg.AutoCaptureAutoStart = [bool]$cfg.AutoCaptureAutoStart
@@ -935,13 +935,13 @@ function Show-CaptureFlash {
     $script:flashForm.Show()
 
     $script:flashTimer = New-Object System.Windows.Forms.Timer
-    $script:flashTimer.Interval = 40
+    $script:flashTimer.Interval = 20
     $script:flashTimer.Add_Tick({
         if (-not $script:flashForm) {
             $script:flashTimer.Stop()
             return
         }
-        $script:flashForm.Opacity -= 0.12
+        $script:flashForm.Opacity -= 0.2
         if ($script:flashForm.Opacity -le 0) {
             $script:flashTimer.Stop()
             $script:flashTimer.Dispose()

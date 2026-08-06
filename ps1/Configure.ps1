@@ -83,10 +83,10 @@ $Defaults = [ordered]@{
     LastRegionHeight             = 0
     SaveLocation                = (Join-Path -Path $ProjectRoot -ChildPath 'screenshots')
     FileNameScheme              = 'screenshot_{timestamp}'
-    AutoCaptureIntervalMs      = 2000   # minimum 500
+    AutoCaptureIntervalMs      = 1000   # minimum 500
     AutoCaptureAutoStart       = $false
-    AutoActionKeyName          = 'F5'
-    AutoActionVKCodes          = @(116)   # F5
+    AutoActionKeyName          = 'F8'
+    AutoActionVKCodes          = @(119)   # F8
     AutoActionTiming           = 'After'   # 'Before' or 'After' the screenshot
     AutoActionDelayMs          = 100
     AutoCaptureUseSessionFolders   = $true
@@ -203,7 +203,7 @@ function Load-CurrentConfig {
 
     $intervalMs = 0
     [void][int]::TryParse([string]$cfg.AutoCaptureIntervalMs, [ref]$intervalMs)
-    if ($intervalMs -le 0) { $intervalMs = 5000 }
+    if ($intervalMs -le 0) { $intervalMs = 1000 }
     if ($intervalMs -lt 500) { $intervalMs = 500 }
     $cfg.AutoCaptureIntervalMs = $intervalMs
 

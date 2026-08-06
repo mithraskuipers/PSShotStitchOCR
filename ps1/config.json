@@ -1,7 +1,8 @@
-﻿{
-    "HotkeyName":  "Alt + S",
+{
+    "HotkeyName":  "Ctrl + Shift + S",
     "HotkeyVKCodes":  [
-                          18,
+                          17,
+                          16,
                           83
                       ],
     "ClipboardHotkeyName":  "Ctrl + Shift + Alt + S",
@@ -11,19 +12,22 @@
                                    18,
                                    83
                                ],
-    "StopHotkeyName":  "Alt + Q",
+    "StopHotkeyName":  "Ctrl + Shift + Q",
     "StopHotkeyVKCodes":  [
-                              18,
+                              17,
+                              16,
                               81
                           ],
-    "ToggleBorderHotkeyName":  "Alt + H",
+    "ToggleBorderHotkeyName":  "Ctrl + Shift + H",
     "ToggleBorderHotkeyVKCodes":  [
-                                      18,
+                                      17,
+                                      16,
                                       72
                                   ],
-    "ToggleAutoCaptureHotkeyName":  "Alt + A",
+    "ToggleAutoCaptureHotkeyName":  "Ctrl + Shift + A",
     "ToggleAutoCaptureHotkeyVKCodes":  [
-                                           18,
+                                           17,
+                                           16,
                                            65
                                        ],
     "MoveModifierName":  "Ctrl + Alt",
@@ -38,22 +42,22 @@
                                   16
                               ],
     "MoveResizeStepPixels":  10,
+    "FineStepPixels":  1,
     "SaveLocation":  "screenshots",
     "FileNameScheme":  "screenshot_{timestamp}",
+    "AutoCaptureIntervalMs":  1000,
     "AutoCaptureAutoStart":  false,
-    "AutoActionKeyName":  "F5",
+    "AutoActionKeyName":  "F8",
     "AutoActionVKCodes":  [
-                              116
+                              119
                           ],
     "AutoActionTiming":  "After",
     "AutoActionDelayMs":  100,
     "AutoCaptureUseSessionFolders":  true,
     "AutoCaptureSessionFolderScheme":  "Session_{date}_{time}",
     "AutoLaunchReviewOnStop":  true,
-    "AutoCaptureIntervalMs":  2000,
-    "FineStepPixels":  1,
-    "LastRegionX":  1417,
-    "LastRegionY":  665,
-    "LastRegionWidth":  1481,
-    "LastRegionHeight":  716
+    "LastRegionX":  0,
+    "LastRegionY":  0,
+    "LastRegionWidth":  0,
+    "LastRegionHeight":  0
 }
