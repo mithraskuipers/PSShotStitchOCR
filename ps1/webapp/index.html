@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Screenshot Stitcher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ============ Drop screen (shown until screenshots are loaded) ============ -->
+  <div id="dropScreen">
+    <div id="dropZone">
+      <h1>Review &amp; stitch screenshots</h1>
+      <p id="dropSubtitle">
+        Drop the <span class="filetag">PNG</span> / <span class="filetag">BMP</span> screenshots from a
+        capture session here, or choose them by hand. Pick which ones to keep, drag to reorder,
+        then stitch them into one long image.
+      </p>
+      <button id="chooseBtn" type="button">Choose screenshots</button>
+      <input type="file" id="fileInput" accept=".png,.bmp" multiple hidden>
+      <div id="dropStatus"></div>
+    </div>
+  </div>
+
+  <!-- ============ App screen ============ -->
+  <div id="appScreen">
+    <header>
+      <span class="appTitle">Screenshot Stitcher</span>
+      <span id="sourceBadge"></span>
+      <div class="spacer"></div>
+      <button class="ghostBtn" id="addMoreBtn">Add more</button>
+      <input type="file" id="addMoreInput" accept=".png,.bmp" multiple hidden>
+      <button class="ghostBtn" id="clearAllBtn">Clear all</button>
+      <button class="ghostBtn" id="closeServerBtn" style="display:none;">Close</button>
+    </header>
+    <main>
+
+      <!-- ---------- Review grid ---------- -->
+      <div id="gridPanel">
+        <div id="gridHead">
+          <h2>Screenshots <span id="gridCount"></span></h2>
+          <div id="gridHeadActions">
+            <button class="ghostBtn small" id="selectAllBtn">Select all</button>
+            <button class="ghostBtn small" id="selectNoneBtn">Select none</button>
+          </div>
+        </div>
+        <div id="grid"></div>
+      </div>
+
+      <!-- ---------- Output panel ---------- -->
+      <div id="outputPanel">
+        <h2>Stitch into</h2>
+
+        <div class="field">
+          <label>Output file name</label>
+          <input type="text" id="outNameInput" placeholder="stitched">
+          <div id="outNamePreview"></div>
+        </div>
+
+        <button class="ghostBtn" id="advancedToggle">Advanced settings ▾</button>
+        <div id="advancedPanel">
+          <div class="settingsGrid" id="settingsGrid"></div>
+          <button class="ghostBtn small" id="resetSettingsBtn">Reset to defaults</button>
+        </div>
+
+        <button id="stitchBtn">Stitch &amp; download</button>
+        <div id="stitchStatus"></div>
+        <div id="stitchLog"></div>
+
+        <div id="resultsBlock"></div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ============ Preview modal ============ -->
+  <div id="previewOverlay">
+    <div id="previewModal">
+      <div id="previewModalHead">
+        <div>
+          <span id="previewModalTitle">Preview</span>
+          <div id="previewModalNote"></div>
+        </div>
+        <button id="previewCloseBtn" title="Close">×</button>
+      </div>
+      <div id="previewModalBody">
+        <img id="previewImg" alt="">
+      </div>
+      <div id="previewModalFoot">
+        <button id="previewPrevBtn" title="Previous">‹ Prev</button>
+        <label class="includeToggle">
+          <input type="checkbox" id="previewIncludeChk"> Keep this screenshot
+        </label>
+        <button id="previewNextBtn" title="Next">Next ›</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="stitch-engine.js"></script>
+  <script src="image-loader.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

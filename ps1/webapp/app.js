@@ -1,0 +1,358 @@
+(function () {
+  const { Loader } = window.ShotStitcher;
+  const Engine = window.ShotStitcher.Engine;
+
+  const el = (id) => document.getElementById(id);
+  const dropScreen = el('dropScreen'), dropZone = el('dropZone'), dropStatus = el('dropStatus');
+  const appScreen = el('appScreen'), sourceBadge = el('sourceBadge'), closeServerBtn = el('closeServerBtn');
+  const grid = el('grid'), gridCount = el('gridCount');
+  const outNameInput = el('outNameInput'), outNamePreview = el('outNamePreview');
+  const advancedToggle = el('advancedToggle'), advancedPanel = el('advancedPanel'), settingsGrid = el('settingsGrid');
+  const stitchBtn = el('stitchBtn'), stitchStatus = el('stitchStatus'), stitchLog = el('stitchLog'), resultsBlock = el('resultsBlock');
+  const previewOverlay = el('previewOverlay'), previewImg = el('previewImg'), previewModalTitle = el('previewModalTitle'), previewModalNote = el('previewModalNote');
+  const previewIncludeChk = el('previewIncludeChk');
+
+  const SETTINGS_KEY = 'shotStitcherSettings';
+  const NAME_KEY = 'shotStitcherOutName';
+
+  const state = {
+    entries: [],     // in display/stitch order
+    previewIndex: -1,
+    config: loadSettings(),
+    fromServer: false,
+  };
+
+  // ------------------------------------------------------------ settings
+
+  function loadSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+      if (saved) return Object.assign({}, Engine.DEFAULT_CONFIG, saved);
+    } catch (e) { /* ignore malformed storage */ }
+    return Object.assign({}, Engine.DEFAULT_CONFIG);
+  }
+  function saveSettings() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.config)); } catch (e) { /* ignore */ }
+  }
+
+  const INT_FIELDS = new Set(['RowSamples', 'MinOverlapPixels', 'MaxOverlapSearchPixels', 'MaxOutputHeightPixels', 'FeatherPixels']);
+  const FIELD_LABELS = {
+    RowSamples: 'Row samples', MinOverlapPixels: 'Min overlap (px)', MaxAvgError: 'Max avg error',
+    MaxOverlapSearchPixels: 'Max overlap search (px, 0=unlimited)', MaxOutputHeightPixels: 'Max sheet height (px)',
+    SortMode: 'Sort mode', MinConfidence: 'Min confidence', FeatherPixels: 'Feather (px)',
+    SideMarginPercent: 'Side margin %', MaxDiffPixelFraction: 'Max diff pixel fraction',
+    MaxOverlapFraction: 'Max overlap fraction', DuplicateFrameMaxAvgError: 'Duplicate frame max error',
+    AmbiguityMinRatio: 'Ambiguity min ratio', OverlapSharpnessRatio: 'Overlap sharpness ratio',
+  };
+
+  function buildSettingsGrid() {
+    settingsGrid.innerHTML = '';
+    Object.keys(Engine.DEFAULT_CONFIG).forEach(key => {
+      const field = document.createElement('div');
+      field.className = 'field';
+      const label = document.createElement('label');
+      label.textContent = FIELD_LABELS[key] || key;
+      field.appendChild(label);
+
+      if (key === 'SortMode') {
+        const sel = document.createElement('select');
+        ['Name', 'Date'].forEach(opt => {
+          const o = document.createElement('option'); o.value = opt; o.textContent = opt;
+          if (state.config.SortMode === opt) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', () => { state.config.SortMode = sel.value; saveSettings(); });
+        field.appendChild(sel);
+      } else {
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.step = INT_FIELDS.has(key) ? '1' : '0.01';
+        input.value = state.config[key];
+        input.addEventListener('change', () => {
+          const v = INT_FIELDS.has(key) ? parseInt(input.value, 10) : parseFloat(input.value);
+          state.config[key] = Number.isFinite(v) ? v : Engine.DEFAULT_CONFIG[key];
+          input.value = state.config[key];
+          saveSettings();
+        });
+        field.appendChild(input);
+      }
+      settingsGrid.appendChild(field);
+    });
+  }
+
+  el('resetSettingsBtn').addEventListener('click', () => {
+    state.config = Object.assign({}, Engine.DEFAULT_CONFIG);
+    saveSettings();
+    buildSettingsGrid();
+  });
+
+  advancedToggle.addEventListener('click', () => {
+    const open = advancedPanel.style.display === 'block';
+    advancedPanel.style.display = open ? 'none' : 'block';
+    advancedToggle.textContent = open ? 'Advanced settings ▾' : 'Advanced settings ▴';
+  });
+
+  outNameInput.addEventListener('input', () => {
+    localStorage.setItem(NAME_KEY, outNameInput.value);
+    updateOutNamePreview();
+  });
+  function updateOutNamePreview() {
+    const name = (outNameInput.value || 'stitched').trim() || 'stitched';
+    outNamePreview.textContent = `${name}.png  (or ${name}_1.png, ${name}_2.png, … if it splits into multiple sheets)`;
+  }
+  outNameInput.value = localStorage.getItem(NAME_KEY) || 'stitched';
+
+  // -------------------------------------------------------------- loading
+
+  async function addBlobs(items) {
+    // items: array of { blob, name }
+    for (const item of items) {
+      const ext = Loader.extOf(item.name);
+      if (!Loader.SUPPORTED_EXT.has(ext)) continue;
+      try {
+        const entry = await Loader.fromBlob(item.blob, item.name);
+        state.entries.push(entry);
+      } catch (err) {
+        console.error('Failed to load', item.name, err);
+      }
+    }
+    renderGrid();
+    showAppScreen();
+  }
+
+  async function tryLoadFromServer() {
+    dropStatus.textContent = 'Checking for a running capture session…';
+    try {
+      const res = await fetch('/api/list', { cache: 'no-store' });
+      if (!res.ok) throw new Error('no server');
+      const data = await res.json();
+      const files = data.files || [];
+      if (files.length === 0) {
+        dropStatus.textContent = 'No screenshots found in that session yet. Drop files in, or choose them.';
+        return;
+      }
+      dropStatus.textContent = `Loading ${files.length} screenshot(s) from ${data.folder || 'the session folder'}…`;
+      const items = [];
+      for (const name of files) {
+        const r = await fetch('/shots/' + encodeURIComponent(name), { cache: 'no-store' });
+        if (r.ok) items.push({ blob: await r.blob(), name });
+      }
+      state.fromServer = true;
+      sourceBadge.textContent = data.folder ? `Session: ${data.folder}` : 'Loaded from capture session';
+      closeServerBtn.style.display = '';
+      await addBlobs(items);
+    } catch (err) {
+      dropStatus.textContent = '';
+    }
+  }
+
+  function showAppScreen() {
+    if (state.entries.length === 0) return;
+    dropScreen.style.display = 'none';
+    appScreen.style.display = 'flex';
+  }
+  function showDropScreen() {
+    appScreen.style.display = 'none';
+    dropScreen.style.display = 'flex';
+    dropStatus.textContent = '';
+  }
+
+  // ---------------------------------------------------------------- grid
+
+  function renderGrid() {
+    grid.innerHTML = '';
+    gridCount.textContent = state.entries.length ? `(${state.entries.filter(e => e.included).length} of ${state.entries.length} kept)` : '';
+    state.entries.forEach((entry, idx) => {
+      const card = document.createElement('div');
+      card.className = 'shotCard' + (entry.included ? '' : ' excluded');
+      card.draggable = true;
+      card.dataset.idx = idx;
+
+      const top = document.createElement('div'); top.className = 'shotCardTop';
+      const order = document.createElement('div'); order.className = 'shotOrder'; order.textContent = idx + 1;
+      const chk = document.createElement('input'); chk.type = 'checkbox'; chk.className = 'shotCheck'; chk.checked = entry.included;
+      chk.addEventListener('change', () => { entry.included = chk.checked; card.classList.toggle('excluded', !chk.checked); gridCount.textContent = `(${state.entries.filter(e => e.included).length} of ${state.entries.length} kept)`; });
+      const spacer = document.createElement('div'); spacer.className = 'shotSpacer';
+      const remove = document.createElement('button'); remove.className = 'shotRemove'; remove.textContent = '×'; remove.title = 'Remove';
+      remove.addEventListener('click', (e) => { e.stopPropagation(); removeEntry(idx); });
+      top.append(order, chk, spacer, remove);
+
+      const thumbWrap = document.createElement('div'); thumbWrap.className = 'shotThumbWrap';
+      const img = document.createElement('img'); img.src = entry.thumbUrl; img.alt = entry.name;
+      img.addEventListener('click', () => openPreview(idx));
+      thumbWrap.appendChild(img);
+
+      const name = document.createElement('div'); name.className = 'shotName'; name.textContent = entry.name;
+      const meta = document.createElement('div'); meta.className = 'shotMeta'; meta.textContent = `${entry.width}×${entry.height}`;
+
+      card.append(top, thumbWrap, name, meta);
+
+      card.addEventListener('dragstart', (e) => {
+        card.classList.add('dragging');
+        e.dataTransfer.setData('text/plain', String(idx));
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      card.addEventListener('dragend', () => card.classList.remove('dragging'));
+      card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('dragOver'); });
+      card.addEventListener('dragleave', () => card.classList.remove('dragOver'));
+      card.addEventListener('drop', (e) => {
+        e.preventDefault();
+        card.classList.remove('dragOver');
+        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        const to = idx;
+        if (from === to || Number.isNaN(from)) return;
+        const [moved] = state.entries.splice(from, 1);
+        state.entries.splice(to, 0, moved);
+        renderGrid();
+      });
+
+      grid.appendChild(card);
+    });
+  }
+
+  function removeEntry(idx) {
+    const [removed] = state.entries.splice(idx, 1);
+    if (removed) URL.revokeObjectURL(removed.blobUrl);
+    if (state.entries.length === 0) { showDropScreen(); }
+    renderGrid();
+  }
+
+  el('selectAllBtn').addEventListener('click', () => { state.entries.forEach(e => e.included = true); renderGrid(); });
+  el('selectNoneBtn').addEventListener('click', () => { state.entries.forEach(e => e.included = false); renderGrid(); });
+
+  el('clearAllBtn').addEventListener('click', () => {
+    state.entries.forEach(e => URL.revokeObjectURL(e.blobUrl));
+    state.entries = [];
+    resultsBlock.innerHTML = '';
+    stitchStatus.textContent = '';
+    stitchLog.textContent = '';
+    showDropScreen();
+  });
+
+  closeServerBtn.addEventListener('click', async () => {
+    try { await fetch('/api/shutdown', { method: 'POST' }); } catch (e) { /* ignore */ }
+    closeServerBtn.textContent = 'Server closed';
+    closeServerBtn.disabled = true;
+  });
+
+  // ------------------------------------------------------------- preview
+
+  function openPreview(idx) {
+    state.previewIndex = idx;
+    renderPreview();
+    previewOverlay.style.display = 'flex';
+  }
+  function renderPreview() {
+    const entry = state.entries[state.previewIndex];
+    if (!entry) { previewOverlay.style.display = 'none'; return; }
+    previewImg.src = entry.blobUrl;
+    previewModalTitle.textContent = entry.name;
+    previewModalNote.textContent = `${state.previewIndex + 1} of ${state.entries.length} · ${entry.width}×${entry.height}`;
+    previewIncludeChk.checked = entry.included;
+  }
+  el('previewCloseBtn').addEventListener('click', () => { previewOverlay.style.display = 'none'; renderGrid(); });
+  el('previewPrevBtn').addEventListener('click', () => { if (state.previewIndex > 0) { state.previewIndex--; renderPreview(); } });
+  el('previewNextBtn').addEventListener('click', () => { if (state.previewIndex < state.entries.length - 1) { state.previewIndex++; renderPreview(); } });
+  previewIncludeChk.addEventListener('change', () => {
+    const entry = state.entries[state.previewIndex];
+    if (entry) entry.included = previewIncludeChk.checked;
+  });
+  previewOverlay.addEventListener('click', (e) => { if (e.target === previewOverlay) { previewOverlay.style.display = 'none'; renderGrid(); } });
+  document.addEventListener('keydown', (e) => {
+    if (previewOverlay.style.display !== 'flex') return;
+    if (e.key === 'Escape') { previewOverlay.style.display = 'none'; renderGrid(); }
+    if (e.key === 'ArrowLeft') el('previewPrevBtn').click();
+    if (e.key === 'ArrowRight') el('previewNextBtn').click();
+  });
+
+  // -------------------------------------------------------------- stitch
+
+  function logLine(msg) {
+    stitchLog.textContent += (stitchLog.textContent ? '\n' : '') + msg;
+    stitchLog.scrollTop = stitchLog.scrollHeight;
+  }
+
+  function canvasToBlob(canvas) {
+    return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  }
+
+  function downloadBlob(filename, blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  stitchBtn.addEventListener('click', async () => {
+    const included = state.entries.filter(e => e.included);
+    if (included.length === 0) {
+      stitchStatus.textContent = 'Nothing selected — check at least one screenshot to stitch.';
+      stitchStatus.className = 'error';
+      return;
+    }
+
+    stitchBtn.disabled = true;
+    stitchStatus.className = '';
+    stitchStatus.textContent = 'Stitching…';
+    stitchLog.textContent = '';
+    resultsBlock.innerHTML = '';
+
+    const stitchEntries = included.map(e => ({ name: e.name, getImage: () => Loader.loadFullImage(e) }));
+
+    try {
+      const sheets = await Engine.stitchAll(stitchEntries, state.config, logLine);
+      stitchStatus.textContent = `Done — ${sheets.length} sheet(s) ready below.`;
+      const baseName = (outNameInput.value || 'stitched').trim() || 'stitched';
+
+      for (let i = 0; i < sheets.length; i++) {
+        const sheet = sheets[i];
+        const canvas = document.createElement('canvas');
+        canvas.width = sheet.width; canvas.height = sheet.height;
+        canvas.getContext('2d').putImageData(Engine.toImageData(sheet), 0, 0);
+        const filename = sheets.length > 1 ? `${baseName}_${i + 1}.png` : `${baseName}.png`;
+
+        const card = document.createElement('div'); card.className = 'sheetCard';
+        const img = document.createElement('img'); img.src = canvas.toDataURL('image/png');
+        const meta = document.createElement('div'); meta.className = 'sheetMeta';
+        meta.textContent = `${filename} — ${sheet.width}×${sheet.height}px`;
+        const btn = document.createElement('button'); btn.textContent = 'Download';
+        btn.addEventListener('click', async () => downloadBlob(filename, await canvasToBlob(canvas)));
+        card.append(img, meta, btn);
+        resultsBlock.appendChild(card);
+      }
+    } catch (err) {
+      console.error(err);
+      stitchStatus.textContent = 'Stitching failed: ' + err.message;
+      stitchStatus.className = 'error';
+    } finally {
+      stitchBtn.disabled = false;
+    }
+  });
+
+  // ------------------------------------------------------------- input UI
+
+  el('chooseBtn').addEventListener('click', () => el('fileInput').click());
+  el('fileInput').addEventListener('change', (e) => {
+    addBlobs(Array.from(e.target.files).map(f => ({ blob: f, name: f.name })));
+    e.target.value = '';
+  });
+  el('addMoreBtn').addEventListener('click', () => el('addMoreInput').click());
+  el('addMoreInput').addEventListener('change', (e) => {
+    addBlobs(Array.from(e.target.files).map(f => ({ blob: f, name: f.name })));
+    e.target.value = '';
+  });
+
+  ['dragover', 'dragenter'].forEach(evt => dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(evt => dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.remove('drag'); }));
+  dropZone.addEventListener('drop', (e) => {
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) addBlobs(files.map(f => ({ blob: f, name: f.name })));
+  });
+
+  // ------------------------------------------------------------------ go
+
+  buildSettingsGrid();
+  updateOutNamePreview();
+  tryLoadFromServer();
+})();

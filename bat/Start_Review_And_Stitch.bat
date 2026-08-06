@@ -7,7 +7,8 @@ REM  Zero-dependency tool:
 REM    - Windows PowerShell 5.1 (built into Windows)
 REM    - or PowerShell 7 (pwsh)
 REM  Normally launched automatically by RegionScreenshot.ps1 when you stop
-REM  auto-capture. Run this directly to review/stitch any folder by hand.
+REM  auto-capture. Run this directly to review/stitch any folder by hand -
+REM  it opens the Screenshot Stitcher web app in your default browser.
 REM ==========================================================
 
 set "PS1_DIR=%~dp0..\ps1\"
@@ -17,15 +18,15 @@ REM ----------------------------------------------------------
 REM Verify required files exist
 REM ----------------------------------------------------------
 
-if not exist "ReviewAndStitchScreenshots.ps1" (
-    echo ERROR: ReviewAndStitchScreenshots.ps1 not found in this folder:
+if not exist "Start-ReviewWebServer.ps1" (
+    echo ERROR: Start-ReviewWebServer.ps1 not found in this folder:
     echo    %CD%
     pause
     exit /b 1
 )
 
-if not exist "PSImgStitcherEngine.ps1" (
-    echo ERROR: PSImgStitcherEngine.ps1 not found in this folder:
+if not exist "webapp\index.html" (
+    echo ERROR: webapp\index.html not found in this folder:
     echo    %CD%
     pause
     exit /b 1
@@ -67,9 +68,8 @@ REM ----------------------------------------------------------
 
 %PS_CMD% ^
     -NoProfile ^
-    -STA ^
     -ExecutionPolicy Bypass ^
-    -File "%PS1_DIR%ReviewAndStitchScreenshots.ps1" %*
+    -File "%PS1_DIR%Start-ReviewWebServer.ps1" %*
 
 if errorlevel 1 (
     echo.

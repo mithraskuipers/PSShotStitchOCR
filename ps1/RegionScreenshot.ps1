@@ -43,10 +43,10 @@
     subfolder under SaveLocation ("session folders" - configurable via
     AutoCaptureUseSessionFolders / AutoCaptureSessionFolderScheme). When
     auto-capture is stopped, that session's screenshots are automatically
-    handed off to the companion "Review & Stitch" tool
-    (ReviewAndStitchScreenshots.ps1 / "Start Review & Stitch.bat"), which
-    shows a preview grid so you can discard any bad frames before stitching
-    them into one long image. This hand-off can be turned off
+    handed off to the Screenshot Stitcher web app (Start-ReviewWebServer.ps1
+    / "Start Review & Stitch.bat" opens it in your browser), which shows a
+    review grid so you can uncheck any bad frames and reorder before
+    stitching them into one long image. This hand-off can be turned off
     (AutoLaunchReviewOnStop) if you'd rather trigger it manually from the
     tray menu's "Review Last Session..." or "Review & Stitch..." items.
 
@@ -976,16 +976,26 @@ $script:lastSessionFolder    = $null
 
 function Start-ReviewTool {
     <#
-        Launches ReviewAndStitchScreenshots.ps1 as its own process, pointed
-        at $SourceFolder. It's a separate STA WinForms app (thumbnail
-        review/discard grid + "Stitch Now"), so it runs independently of
-        this tool's own message loop instead of blocking it.
+        Launches Start-ReviewWebServer.ps1 as its own process, pointed at
+        $SourceFolder. That script serves the Screenshot Stitcher web app
+        (ps1/webapp/) plus this session's screenshots over a local HTTP
+        server and opens the default browser to it - review/discard/reorder
+        and stitching all happen there now instead of in a WinForms window,
+        so this runs independently of this tool's own message loop exactly
+        like the old review app did.
+
+        The child process's console output is redirected to a log file
+        (not shown in a window) so a crash on launch leaves something to
+        look at instead of just a Windows "Application Error" popup. If the
+        process exits within moments of starting - the signature of a
+        launch-time crash rather than the server actually running - this
+        retries once before giving up.
     #>
     param([string]$SourceFolder)
 
-    $reviewScript = Join-Path -Path $ScriptRoot -ChildPath 'ReviewAndStitchScreenshots.ps1'
+    $reviewScript = Join-Path -Path $ScriptRoot -ChildPath 'Start-ReviewWebServer.ps1'
     if (-not (Test-Path -LiteralPath $reviewScript)) {
-        $trayIcon.ShowBalloonTip(2000, 'Region Screenshot Tool', 'ReviewAndStitchScreenshots.ps1 was not found next to this script.', [System.Windows.Forms.ToolTipIcon]::Warning)
+        $trayIcon.ShowBalloonTip(2000, 'Region Screenshot Tool', 'Start-ReviewWebServer.ps1 was not found next to this script.', [System.Windows.Forms.ToolTipIcon]::Warning)
         return
     }
 
@@ -994,11 +1004,36 @@ function Start-ReviewTool {
     # and does not auto-quote ones that contain spaces (unlike .NET's
     # newer ArgumentList property), so a path like "C:\My Screenshots"
     # would otherwise be split into two arguments.
-    $argList = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$reviewScript`"")
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$reviewScript`"")
     if ($SourceFolder) { $argList += @('-SourceFolder', "`"$SourceFolder`"") }
 
+    $logDir = Join-Path $env:TEMP 'ShotStitcherReviewServer'
+    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
+
+    function _tryLaunch {
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+        $outLog = Join-Path $logDir "launch_${stamp}_out.log"
+        $errLog = Join-Path $logDir "launch_${stamp}_err.log"
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
+            -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+        # A launch-time crash (e.g. the 0xc0000142 "unable to start correctly"
+        # case) exits within milliseconds; the server itself runs
+        # indefinitely once actually up, so a brief wait tells them apart.
+        Start-Sleep -Milliseconds 900
+        return @{ Process = $proc; OutLog = $outLog; ErrLog = $errLog }
+    }
+
     try {
-        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList | Out-Null
+        $attempt = _tryLaunch
+        if ($attempt.Process.HasExited) {
+            Start-Sleep -Milliseconds 300
+            $attempt = _tryLaunch
+        }
+        if ($attempt.Process.HasExited) {
+            $trayIcon.ShowBalloonTip(3000, 'Region Screenshot Tool',
+                "Review & Stitch failed to start twice (exit code $($attempt.Process.ExitCode)). Log: $($attempt.ErrLog)",
+                [System.Windows.Forms.ToolTipIcon]::Warning)
+        }
     }
     catch {
         $trayIcon.ShowBalloonTip(2000, 'Region Screenshot Tool', "Couldn't launch Review & Stitch: $($_.Exception.Message)", [System.Windows.Forms.ToolTipIcon]::Warning)

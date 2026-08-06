@@ -1,0 +1,199 @@
+<#
+Start-ReviewWebServer.ps1
+
+Serves the Screenshot Stitcher web app (ps1/webapp/*) plus one session's
+screenshots over a local HTTP server, then opens the default browser to it.
+This replaces ReviewAndStitchScreenshots.ps1 / PSImgStitcherEngine.ps1 - the
+review grid and the stitching math both now live in the web app; this
+script's only job is "hand the browser the files it needs".
+
+No file-system-access API, no writing back to disk from the browser -
+the web app downloads the stitched result the same way any other browser
+download works, matching the plain drag-and-drop / download model.
+
+Usage:
+    Start-ReviewWebServer.ps1 -SourceFolder "C:\path\to\Session_..."
+    Start-ReviewWebServer.ps1                     # prompts for a folder
+#>
+
+param(
+    [string]$SourceFolder,
+    [int]$Port = 0
+)
+
+$ErrorActionPreference = 'Stop'
+$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$WebAppRoot = Join-Path $ScriptRoot 'webapp'
+
+if (-not (Test-Path -LiteralPath $WebAppRoot)) {
+    Write-Host "ERROR: webapp folder not found next to this script: $WebAppRoot" -ForegroundColor Red
+    if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to exit' }
+    exit 1
+}
+
+if (-not $SourceFolder) {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Choose the screenshot session folder to review'
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
+        Write-Host 'No folder chosen - exiting.'
+        exit 0
+    }
+    $SourceFolder = $dlg.SelectedPath
+}
+
+if (-not (Test-Path -LiteralPath $SourceFolder)) {
+    Write-Host "ERROR: source folder not found: $SourceFolder" -ForegroundColor Red
+    if ($Host.Name -eq 'ConsoleHost') { Read-Host 'Press Enter to exit' }
+    exit 1
+}
+
+# ---------------------------------------------------------------- sorting
+
+function Get-NaturalSortedScreenshots {
+    param([string]$Folder)
+
+    $exts = @('.png', '.bmp')
+    $files = Get-ChildItem -LiteralPath $Folder -File -ErrorAction SilentlyContinue |
+        Where-Object { $exts -contains $_.Extension.ToLowerInvariant() }
+
+    # Same numeric-aware ordering as the old PSImgStitcherEngine
+    # NaturalFileComparer: split each filename on runs of digits and
+    # compare digit-runs numerically, everything else as plain text.
+    $withKey = foreach ($f in $files) {
+        $parts = [regex]::Split($f.Name, '(\d+)')
+        [PSCustomObject]@{ File = $f; Parts = $parts }
+    }
+    $sorted = $withKey | Sort-Object -Property @{
+        Expression = {
+            ($_.Parts | ForEach-Object {
+                if ($_ -match '^\d+$') { $_.PadLeft(20, '0') } else { $_.ToLowerInvariant() }
+            }) -join "`0"
+        }
+    }
+    return @($sorted | ForEach-Object { $_.File })
+}
+
+# ------------------------------------------------------------------ mime
+
+$MimeTypes = @{
+    '.html' = 'text/html; charset=utf-8'
+    '.js'   = 'application/javascript; charset=utf-8'
+    '.css'  = 'text/css; charset=utf-8'
+    '.png'  = 'image/png'
+    '.bmp'  = 'image/bmp'
+    '.json' = 'application/json; charset=utf-8'
+}
+
+function Get-Mime([string]$path) {
+    $ext = [System.IO.Path]::GetExtension($path).ToLowerInvariant()
+    if ($MimeTypes.ContainsKey($ext)) { return $MimeTypes[$ext] }
+    return 'application/octet-stream'
+}
+
+# --------------------------------------------------------------- listener
+
+function Find-OpenPort([int]$preferred) {
+    if ($preferred -gt 0) { return $preferred }
+    for ($p = 8765; $p -lt 8865; $p++) {
+        $listener = $null
+        try {
+            $listener = New-Object System.Net.HttpListener
+            $listener.Prefixes.Add("http://localhost:$p/")
+            $listener.Start()
+            $listener.Stop()
+            return $p
+        }
+        catch { continue }
+        finally { if ($listener) { $listener.Close() } }
+    }
+    throw 'No open port found in range 8765-8864.'
+}
+
+$Port = Find-OpenPort -preferred $Port
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add("http://localhost:$Port/")
+$listener.Start()
+
+$url = "http://localhost:$Port/"
+Write-Host "Serving Screenshot Stitcher at $url"
+Write-Host "Session folder: $SourceFolder"
+Write-Host 'Press Ctrl+C here (or click Close in the browser) to stop.'
+Start-Process $url
+
+$running = $true
+while ($running -and $listener.IsListening) {
+    $context = $listener.GetContext()
+    $request = $context.Request
+    $response = $context.Response
+
+    try {
+        $path = $request.Url.AbsolutePath
+
+        if ($path -eq '/api/list') {
+            $files = Get-NaturalSortedScreenshots -Folder $SourceFolder
+            $payload = [PSCustomObject]@{
+                folder = $SourceFolder
+                files  = @($files | ForEach-Object { $_.Name })
+            }
+            $json = $payload | ConvertTo-Json -Depth 3
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            $response.ContentType = 'application/json; charset=utf-8'
+            $response.ContentLength64 = $bytes.Length
+            $response.OutputStream.Write($bytes, 0, $bytes.Length)
+        }
+        elseif ($path -eq '/api/shutdown' -and $request.HttpMethod -eq 'POST') {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"ok":true}')
+            $response.ContentType = 'application/json; charset=utf-8'
+            $response.ContentLength64 = $bytes.Length
+            $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            $running = $false
+        }
+        elseif ($path.StartsWith('/shots/')) {
+            $name = [System.Uri]::UnescapeDataString($path.Substring('/shots/'.Length))
+            # Reject path traversal - only serve plain filenames from SourceFolder itself.
+            if ($name -match '[\\/]' -or $name -match '\.\.') {
+                $response.StatusCode = 400
+            }
+            else {
+                $filePath = Join-Path $SourceFolder $name
+                if (Test-Path -LiteralPath $filePath -PathType Leaf) {
+                    $bytes = [System.IO.File]::ReadAllBytes($filePath)
+                    $response.ContentType = Get-Mime $filePath
+                    $response.ContentLength64 = $bytes.Length
+                    $response.OutputStream.Write($bytes, 0, $bytes.Length)
+                }
+                else {
+                    $response.StatusCode = 404
+                }
+            }
+        }
+        else {
+            # Static webapp files. "/" -> index.html.
+            $rel = if ($path -eq '/') { 'index.html' } else { $path.TrimStart('/') }
+            $filePath = Join-Path $WebAppRoot $rel
+            $fullWebAppRoot = (Resolve-Path -LiteralPath $WebAppRoot).Path
+            $resolvedFile = try { (Resolve-Path -LiteralPath $filePath -ErrorAction Stop).Path } catch { $null }
+            if ($resolvedFile -and $resolvedFile.StartsWith($fullWebAppRoot, [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $resolvedFile -PathType Leaf)) {
+                $bytes = [System.IO.File]::ReadAllBytes($resolvedFile)
+                $response.ContentType = Get-Mime $resolvedFile
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            }
+            else {
+                $response.StatusCode = 404
+            }
+        }
+    }
+    catch {
+        try { $response.StatusCode = 500 } catch { }
+        Write-Warning "Request error: $_"
+    }
+    finally {
+        try { $response.OutputStream.Close() } catch { }
+    }
+}
+
+$listener.Stop()
+$listener.Close()
+Write-Host 'Server stopped.'
