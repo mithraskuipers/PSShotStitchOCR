@@ -56,6 +56,8 @@
     "AutoCaptureUseSessionFolders":  true,
     "AutoCaptureSessionFolderScheme":  "Session_{date}_{time}",
     "AutoLaunchReviewOnStop":  true,
+    "AutoCaptureDuplicateDetectionEnabled":  true,
+    "AutoCaptureDuplicateThresholdPercent":  99.0,
     "LastRegionX":  0,
     "LastRegionY":  0,
     "LastRegionWidth":  0,

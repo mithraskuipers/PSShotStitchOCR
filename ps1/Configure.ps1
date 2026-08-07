@@ -92,6 +92,8 @@ $Defaults = [ordered]@{
     AutoCaptureUseSessionFolders   = $true
     AutoCaptureSessionFolderScheme = 'Session_{date}_{time}'
     AutoLaunchReviewOnStop     = $true
+    AutoCaptureDuplicateDetectionEnabled = $true
+    AutoCaptureDuplicateThresholdPercent = 99.0
 }
 
 function Load-CurrentConfig {
@@ -207,6 +209,13 @@ function Load-CurrentConfig {
     if ($intervalMs -lt 500) { $intervalMs = 500 }
     $cfg.AutoCaptureIntervalMs = $intervalMs
 
+    $cfg.AutoCaptureDuplicateDetectionEnabled = [bool]$cfg.AutoCaptureDuplicateDetectionEnabled
+    $dupThreshold = 0.0
+    [void][double]::TryParse([string]$cfg.AutoCaptureDuplicateThresholdPercent, [ref]$dupThreshold)
+    if ($dupThreshold -le 0) { $dupThreshold = 99.0 }
+    if ($dupThreshold -gt 100) { $dupThreshold = 100.0 }
+    $cfg.AutoCaptureDuplicateThresholdPercent = $dupThreshold
+
     return $cfg
 }
 
@@ -221,7 +230,7 @@ $form.StartPosition   = 'CenterScreen'
 $form.FormBorderStyle = 'FixedDialog'
 $form.MaximizeBox     = $false
 $form.MinimizeBox     = $false
-$form.ClientSize      = New-Object System.Drawing.Size(480, 1070)
+$form.ClientSize      = New-Object System.Drawing.Size(480, 1130)
 $form.Font            = New-Object System.Drawing.Font('Segoe UI', 9)
 
 $y = 15
@@ -919,7 +928,7 @@ $y += 35
 $grpAuto = New-Object System.Windows.Forms.GroupBox
 $grpAuto.Text     = 'Automatic screenshots'
 $grpAuto.Location = New-Object System.Drawing.Point(15, $y)
-$grpAuto.Size     = New-Object System.Drawing.Size(445, 340)
+$grpAuto.Size     = New-Object System.Drawing.Size(445, 400)
 $form.Controls.Add($grpAuto)
 
 # What key combination to auto-press.
@@ -1090,7 +1099,49 @@ $chkAutoLaunchReview.Location = New-Object System.Drawing.Point(15, 317)
 $chkAutoLaunchReview.Checked  = [bool]$current.AutoLaunchReviewOnStop
 $grpAuto.Controls.Add($chkAutoLaunchReview)
 
-$y += 350
+$sep3 = New-Object System.Windows.Forms.Label
+$sep3.BorderStyle = 'Fixed3D'
+$sep3.Location    = New-Object System.Drawing.Point(15, 341)
+$sep3.Size        = New-Object System.Drawing.Size(415, 2)
+$grpAuto.Controls.Add($sep3)
+
+# Duplicate-frame pause: compares each new auto-capture shot against the
+# previous one and, if they're too similar, pauses and asks whether to
+# stop or keep going - catches a stalled/idle capture instead of silently
+# filling a session folder with near-identical shots.
+$chkDuplicatePause = New-Object System.Windows.Forms.CheckBox
+$chkDuplicatePause.Text     = 'Pause and ask if a shot looks like a duplicate of the last one'
+$chkDuplicatePause.AutoSize = $true
+$chkDuplicatePause.Location = New-Object System.Drawing.Point(15, 353)
+$chkDuplicatePause.Checked  = [bool]$current.AutoCaptureDuplicateDetectionEnabled
+$grpAuto.Controls.Add($chkDuplicatePause)
+
+$lblDuplicateThreshold = New-Object System.Windows.Forms.Label
+$lblDuplicateThreshold.Text = 'Similarity threshold (%):'
+$lblDuplicateThreshold.AutoSize = $true
+$lblDuplicateThreshold.Location = New-Object System.Drawing.Point(35, 378)
+$grpAuto.Controls.Add($lblDuplicateThreshold)
+
+$numDuplicateThreshold = New-Object System.Windows.Forms.NumericUpDown
+$numDuplicateThreshold.Location      = New-Object System.Drawing.Point(175, 376)
+$numDuplicateThreshold.Size          = New-Object System.Drawing.Size(70, 24)
+$numDuplicateThreshold.DecimalPlaces = 1
+$numDuplicateThreshold.Increment     = 0.5
+$numDuplicateThreshold.Minimum       = 50
+$numDuplicateThreshold.Maximum       = 100
+$numDuplicateThreshold.Value         = [Math]::Min(100, [Math]::Max(50, [decimal][double]$current.AutoCaptureDuplicateThresholdPercent))
+$numDuplicateThreshold.Enabled       = $chkDuplicatePause.Checked
+$grpAuto.Controls.Add($numDuplicateThreshold)
+$chkDuplicatePause.Add_CheckedChanged({ $numDuplicateThreshold.Enabled = $chkDuplicatePause.Checked })
+
+$lblDuplicateHint = New-Object System.Windows.Forms.Label
+$lblDuplicateHint.Text = '99 = only near-identical; lower it to catch smaller changes.'
+$lblDuplicateHint.AutoSize = $true
+$lblDuplicateHint.ForeColor = [System.Drawing.Color]::Gray
+$lblDuplicateHint.Location = New-Object System.Drawing.Point(255, 379)
+$grpAuto.Controls.Add($lblDuplicateHint)
+
+$y += 410
 
 # --- Buttons ---
 $btnSave = New-Object System.Windows.Forms.Button
@@ -1201,6 +1252,8 @@ $btnSave.Add_Click({
         AutoCaptureUseSessionFolders   = [bool]$chkSessionFolders.Checked
         AutoCaptureSessionFolderScheme = $txtSessionScheme.Text
         AutoLaunchReviewOnStop     = [bool]$chkAutoLaunchReview.Checked
+        AutoCaptureDuplicateDetectionEnabled = [bool]$chkDuplicatePause.Checked
+        AutoCaptureDuplicateThresholdPercent = [double]$numDuplicateThreshold.Value
         LastRegionX                  = [int]$current.LastRegionX
         LastRegionY                  = [int]$current.LastRegionY
         LastRegionWidth              = [int]$current.LastRegionWidth
@@ -1265,6 +1318,8 @@ $btnDefaults.Add_Click({
     $chkSessionFolders.Checked = [bool]$Defaults.AutoCaptureUseSessionFolders
     $txtSessionScheme.Text = [string]$Defaults.AutoCaptureSessionFolderScheme
     $chkAutoLaunchReview.Checked = [bool]$Defaults.AutoLaunchReviewOnStop
+    $chkDuplicatePause.Checked = [bool]$Defaults.AutoCaptureDuplicateDetectionEnabled
+    $numDuplicateThreshold.Value = [Math]::Min(100, [Math]::Max(50, [decimal][double]$Defaults.AutoCaptureDuplicateThresholdPercent))
 })
 $form.Controls.Add($btnDefaults)
 

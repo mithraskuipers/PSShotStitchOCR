@@ -245,6 +245,92 @@ namespace RegionTool
 "@
 
 # ---------------------------------------------------------------------------
+# Duplicate-frame detection for auto-capture: compares two same-size
+# screenshots pixel-by-pixel and returns the average absolute per-channel
+# difference (0 = identical, 255 = maximum possible difference), the same
+# scale PSImgStitcherEngine.ps1's AvgError uses. Both bitmaps are coerced to
+# 24bpp RGB first (mirroring PicoImage.FromBitmap in that engine) since
+# LockBits needs a known, matching pixel format to read raw bytes safely.
+# ---------------------------------------------------------------------------
+Add-Type -Language CSharp -ReferencedAssemblies System.Drawing -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+namespace RegionTool
+{
+    public static class ImageDiff
+    {
+        private static Bitmap EnsureFormat24bppRgb(Bitmap src, out bool owned)
+        {
+            if (src.PixelFormat == PixelFormat.Format24bppRgb)
+            {
+                owned = false;
+                return src;
+            }
+            Bitmap converted = new Bitmap(src.Width, src.Height, PixelFormat.Format24bppRgb);
+            using (Graphics g = Graphics.FromImage(converted))
+            {
+                g.DrawImage(src, 0, 0, src.Width, src.Height);
+            }
+            owned = true;
+            return converted;
+        }
+
+        // Returns -1 if the two bitmaps aren't the same size (e.g. the
+        // capture region was resized between shots) - a raw pixel compare
+        // wouldn't mean anything in that case, so callers should treat -1
+        // as "not comparable" rather than "very different".
+        public static double AverageDiff(Bitmap a, Bitmap b)
+        {
+            if (a.Width != b.Width || a.Height != b.Height) return -1;
+            int width = a.Width, height = a.Height;
+            if (width == 0 || height == 0) return -1;
+
+            bool ownedA, ownedB;
+            Bitmap ca = EnsureFormat24bppRgb(a, out ownedA);
+            Bitmap cb = EnsureFormat24bppRgb(b, out ownedB);
+            try
+            {
+                Rectangle rect = new Rectangle(0, 0, width, height);
+                BitmapData da = ca.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                BitmapData db = cb.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+                try
+                {
+                    int rowBytes = width * 3;
+                    byte[] rowA = new byte[Math.Abs(da.Stride)];
+                    byte[] rowB = new byte[Math.Abs(db.Stride)];
+                    long total = 0;
+                    for (int y = 0; y < height; y++)
+                    {
+                        Marshal.Copy(IntPtr.Add(da.Scan0, y * da.Stride), rowA, 0, rowA.Length);
+                        Marshal.Copy(IntPtr.Add(db.Scan0, y * db.Stride), rowB, 0, rowB.Length);
+                        for (int i = 0; i < rowBytes; i++)
+                        {
+                            int diff = rowA[i] - rowB[i];
+                            total += diff < 0 ? -diff : diff;
+                        }
+                    }
+                    return (double)total / (width * height * 3);
+                }
+                finally
+                {
+                    ca.UnlockBits(da);
+                    cb.UnlockBits(db);
+                }
+            }
+            finally
+            {
+                if (ownedA) ca.Dispose();
+                if (ownedB) cb.Dispose();
+            }
+        }
+    }
+}
+"@
+
+# ---------------------------------------------------------------------------
 # Script root + config file
 # ---------------------------------------------------------------------------
 # $PSScriptRoot is empty when this script is fed in via Invoke-Expression
@@ -324,6 +410,8 @@ $script:DefaultConfig = [ordered]@{
     AutoActionTiming           = 'After'   # 'Before' or 'After' the screenshot
     AutoActionDelayMs          = 100
     AutoLaunchReviewOnStop      = $true
+    AutoCaptureDuplicateDetectionEnabled = $true
+    AutoCaptureDuplicateThresholdPercent = 99.0   # pause + prompt when a shot is at least this similar to the previous one
 }
 
 function Get-ToolConfig {
@@ -463,6 +551,13 @@ function Get-ToolConfig {
     [void][int]::TryParse([string]$cfg.AutoActionDelayMs, [ref]$actionDelay)
     if ($actionDelay -lt 0) { $actionDelay = 0 }
     $cfg.AutoActionDelayMs = $actionDelay
+
+    $cfg.AutoCaptureDuplicateDetectionEnabled = [bool]$cfg.AutoCaptureDuplicateDetectionEnabled
+    $dupThreshold = 0.0
+    [void][double]::TryParse([string]$cfg.AutoCaptureDuplicateThresholdPercent, [ref]$dupThreshold)
+    if ($dupThreshold -le 0) { $dupThreshold = 99.0 }
+    if ($dupThreshold -gt 100) { $dupThreshold = 100.0 }
+    $cfg.AutoCaptureDuplicateThresholdPercent = $dupThreshold
 
     return $cfg
 }
@@ -1059,6 +1154,135 @@ function Send-KeyCombo {
 }
 
 # ---------------------------------------------------------------------------
+# Duplicate-frame pause: when auto-capture is running, each new shot is
+# compared against the previous one. If they're at least
+# AutoCaptureDuplicateThresholdPercent similar, auto-capture (and any
+# configured auto-keypress) pauses and the user is asked whether to stop or
+# keep going - useful for noticing when whatever's being captured has
+# stalled (e.g. a page finished loading, or a game froze) instead of
+# quietly filling a session folder with near-identical shots.
+# ---------------------------------------------------------------------------
+$script:lastAutoCaptureBitmap = $null
+
+function Clear-LastAutoCaptureBitmap {
+    # [System.Drawing.Bitmap]::FromFile keeps the source file locked for as
+    # long as the Bitmap is alive, so this must run before anything else
+    # (Stop-AutoCapture's hand-off to Review & Stitch, a fresh session
+    # starting, or the tool exiting) might need to read/move that file.
+    if ($script:lastAutoCaptureBitmap) {
+        $script:lastAutoCaptureBitmap.Dispose()
+        $script:lastAutoCaptureBitmap = $null
+    }
+}
+
+function Show-DuplicateFramePrompt {
+    <#
+        Small topmost dialog telling the user the last two auto-captured
+        shots were nearly identical, with Stop / Continue buttons. Blocks
+        (ShowDialog) until the user picks one; returns $true for Stop,
+        $false for Continue. The auto-capture timer is always stopped by
+        the caller before this shows, so nothing else fires while it's up.
+    #>
+    param([Parameter(Mandatory)][double]$SimilarityPercent)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = 'Region Screenshot Tool'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.ShowInTaskbar   = $true
+    $dlg.TopMost         = $true
+    $dlg.StartPosition   = 'CenterScreen'
+    $dlg.ClientSize      = New-Object System.Drawing.Size(400, 140)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $simText = $SimilarityPercent.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
+    $lbl.Text     = "Current screenshot very similar ($simText%) to last screenshot.`n`nStop auto-capture, or continue?"
+    $lbl.Location = New-Object System.Drawing.Point(18, 16)
+    $lbl.Size     = New-Object System.Drawing.Size(364, 70)
+    $dlg.Controls.Add($lbl)
+
+    $btnStop = New-Object System.Windows.Forms.Button
+    $btnStop.Text         = 'Stop'
+    $btnStop.Size         = New-Object System.Drawing.Size(110, 30)
+    $btnStop.Location     = New-Object System.Drawing.Point(160, 92)
+    $btnStop.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $dlg.Controls.Add($btnStop)
+
+    $btnContinue = New-Object System.Windows.Forms.Button
+    $btnContinue.Text         = 'Continue'
+    $btnContinue.Size         = New-Object System.Drawing.Size(110, 30)
+    $btnContinue.Location     = New-Object System.Drawing.Point(276, 92)
+    $btnContinue.DialogResult = [System.Windows.Forms.DialogResult]::No
+    $dlg.Controls.Add($btnContinue)
+
+    $dlg.AcceptButton = $btnContinue
+    $dlg.CancelButton = $btnContinue
+
+    $result = $dlg.ShowDialog()
+    $dlg.Dispose()
+    return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+function Test-DuplicateFrameAndMaybePause {
+    <#
+        Call right after an auto-capture shot is saved. Reloads it from
+        disk, compares it against the previous auto-capture shot, and if
+        they're similar enough, pauses the timer and prompts the user.
+        Returns $true if the tick handler should stop immediately (either
+        because auto-capture was paused-then-resumed, or stopped outright,
+        both of which make finishing the rest of that tick's work, like a
+        trailing auto-keypress, pointless or wrong).
+    #>
+    param([string]$Path)
+
+    if (-not $script:Config.AutoCaptureDuplicateDetectionEnabled -or -not $Path) { return $false }
+
+    $newBmp = $null
+    try {
+        $newBmp = [System.Drawing.Bitmap]::FromFile($Path)
+    }
+    catch {
+        Write-Log "WARNING: couldn't reload '$Path' for duplicate-frame comparison: $($_.Exception.Message)"
+        return $false
+    }
+
+    $isDuplicate = $false
+    $similarity  = 0.0
+    if ($script:lastAutoCaptureBitmap) {
+        $avgDiff = [RegionTool.ImageDiff]::AverageDiff($script:lastAutoCaptureBitmap, $newBmp)
+        if ($avgDiff -ge 0) {
+            $similarity = 100.0 - [Math]::Min(100.0, ($avgDiff / 255.0) * 100.0)
+            if ($similarity -ge [double]$script:Config.AutoCaptureDuplicateThresholdPercent) {
+                $isDuplicate = $true
+            }
+        }
+    }
+
+    Clear-LastAutoCaptureBitmap
+    $script:lastAutoCaptureBitmap = $newBmp
+
+    if (-not $isDuplicate) { return $false }
+
+    Write-Log ("Auto-capture paused: shot is {0:N1}% similar to the previous one (threshold {1}%)." -f $similarity, $script:Config.AutoCaptureDuplicateThresholdPercent)
+    $script:autoCaptureTimer.Stop()
+    $itemAutoCapture.Text = 'Auto-Capture Paused (similar frame)'
+
+    $shouldStop = Show-DuplicateFramePrompt -SimilarityPercent $similarity
+
+    if ($shouldStop) {
+        Write-Log 'Auto-capture stopped by user from duplicate-frame prompt.'
+        Stop-AutoCapture
+    }
+    else {
+        $script:autoCaptureTimer.Start()
+        $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
+        Write-Log 'Auto-capture resumed by user from duplicate-frame prompt.'
+    }
+    return $true
+}
+
+# ---------------------------------------------------------------------------
 # Auto-capture: takes a screenshot on a timer, independent of the hotkey.
 # Started/stopped from the tray menu, and can optionally auto-start. Can
 # also optionally send a key combo (e.g. F8) to the currently focused app
@@ -1072,6 +1296,7 @@ $script:autoCaptureTimer.Add_Tick({
     if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
         $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
         Show-CaptureFlash -Rect $script:captureRect
+        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
         if ($script:Config.AutoActionDelayMs -gt 0) {
             Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
         }
@@ -1086,6 +1311,7 @@ $script:autoCaptureTimer.Add_Tick({
         }
         $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
         Show-CaptureFlash -Rect $script:captureRect
+        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
     }
 })
 
@@ -1238,6 +1464,9 @@ function Start-AutoCapture {
     else {
         $script:currentSessionFolder = $null
     }
+    # A new session's first shot shouldn't be compared against whatever the
+    # last session's last shot was.
+    Clear-LastAutoCaptureBitmap
     $script:autoCaptureTimer.Interval = [Math]::Max(500, [int]$script:Config.AutoCaptureIntervalMs)
     $script:autoCaptureTimer.Start()
     $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
@@ -1248,6 +1477,12 @@ function Start-AutoCapture {
 function Stop-AutoCapture {
     $script:autoCaptureTimer.Stop()
     $itemAutoCapture.Text = 'Start Auto-Capture'
+
+    # Must happen before anything below might touch the most recent shot's
+    # file (e.g. handing the session off to Review & Stitch) - the Bitmap
+    # loaded for duplicate-frame comparison keeps that file locked until
+    # disposed.
+    Clear-LastAutoCaptureBitmap
 
     $finishedSession = $script:currentSessionFolder
     $script:currentSessionFolder = $null
@@ -1317,6 +1552,7 @@ function Invoke-CleanExit {
     if ($script:captureRect) { Save-LastRegion -Rect $script:captureRect }
     $pollTimer.Stop()
     $script:autoCaptureTimer.Stop()
+    Clear-LastAutoCaptureBitmap
     Hide-CaptureFlash
     Remove-RegionBorder
     Write-Log 'RegionScreenshot exiting.'
