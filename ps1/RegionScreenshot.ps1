@@ -1335,7 +1335,10 @@ function Test-DuplicateFrameAndMaybePause {
 # ---------------------------------------------------------------------------
 $script:autoCaptureTimer = New-Object System.Windows.Forms.Timer
 $script:autoCaptureTimer.Add_Tick({
-    if ($script:duplicatePromptActive) { return }
+    if ($script:duplicatePromptActive) {
+        Write-Log 'Auto-capture tick skipped: duplicate-frame prompt is active.'
+        return
+    }
     $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
     $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
     if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
@@ -1668,26 +1671,40 @@ $pollTimer.Add_Tick({
     # Clipboard combo (Ctrl+Shift+Alt+S) is a superset of the plain save
     # combo (Ctrl+Shift+S), so it's checked first - if it fires, the plain
     # save combo is suppressed for this tick so a single key press doesn't
-    # trigger both.
+    # trigger both. Both are skipped while the duplicate-frame prompt is
+    # up: if AutoActionVKCodes happens to overlap with either combo (e.g.
+    # the auto-press key is also Ctrl+Shift+S), a paused auto-capture
+    # session shouldn't still be able to sneak a shot in through the
+    # manual-capture path.
     $clipboardDown = Test-HotkeyCombo -Codes $script:Config.ClipboardHotkeyVKCodes
     if ($clipboardDown -and -not $script:clipboardHotkeyWasDown) {
-        Copy-RegionScreenshotToClipboard -Rect $script:captureRect
-        Show-CaptureFlash -Rect $script:captureRect
-        $trayIcon.ShowBalloonTip(1200, 'Screenshot Copied', 'Region copied to clipboard.', [System.Windows.Forms.ToolTipIcon]::Info)
+        if ($script:duplicatePromptActive) {
+            Write-Log 'Clipboard hotkey ignored: duplicate-frame prompt is active.'
+        }
+        else {
+            Copy-RegionScreenshotToClipboard -Rect $script:captureRect
+            Show-CaptureFlash -Rect $script:captureRect
+            $trayIcon.ShowBalloonTip(1200, 'Screenshot Copied', 'Region copied to clipboard.', [System.Windows.Forms.ToolTipIcon]::Info)
+        }
     }
     $script:clipboardHotkeyWasDown = $clipboardDown
 
     $allDown = Test-HotkeyCombo -Codes $script:Config.HotkeyVKCodes
     if ($allDown -and -not $clipboardDown -and -not $script:hotkeyWasDown) {
-        $path = Save-RegionScreenshot -Rect $script:captureRect
-        # Only tracked when there's no active auto-capture session - those
-        # already have their own folder via $script:currentSessionFolder,
-        # this is purely for the "just pressed Alt+S a few times" case.
-        if (-not $script:currentSessionFolder) {
-            $script:manualShotFolder = Split-Path -Path $path -Parent
+        if ($script:duplicatePromptActive) {
+            Write-Log 'Manual capture hotkey ignored: duplicate-frame prompt is active.'
         }
-        Show-CaptureFlash -Rect $script:captureRect
-        $trayIcon.ShowBalloonTip(1200, 'Screenshot Saved', (Split-Path $path -Leaf), [System.Windows.Forms.ToolTipIcon]::Info)
+        else {
+            $path = Save-RegionScreenshot -Rect $script:captureRect
+            # Only tracked when there's no active auto-capture session - those
+            # already have their own folder via $script:currentSessionFolder,
+            # this is purely for the "just pressed Alt+S a few times" case.
+            if (-not $script:currentSessionFolder) {
+                $script:manualShotFolder = Split-Path -Path $path -Parent
+            }
+            Show-CaptureFlash -Rect $script:captureRect
+            $trayIcon.ShowBalloonTip(1200, 'Screenshot Saved', (Split-Path $path -Leaf), [System.Windows.Forms.ToolTipIcon]::Info)
+        }
     }
     $script:hotkeyWasDown = $allDown
 
