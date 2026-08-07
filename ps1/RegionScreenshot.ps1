@@ -1315,28 +1315,63 @@ function Test-DuplicateFrameAndMaybePause {
 # between the key press and the screenshot.
 # ---------------------------------------------------------------------------
 $script:autoCaptureTimer = New-Object System.Windows.Forms.Timer
+$script:autoCaptureTickBusy = $false
 $script:autoCaptureTimer.Add_Tick({
-    $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
-    $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
-    if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
-        $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
-        Show-CaptureFlash -Rect $script:captureRect
-        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
-        if ($script:Config.AutoActionDelayMs -gt 0) {
-            Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
-        }
-        Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
-    }
-    else {
-        if ($hasAction) {
-            Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
-            if ($script:Config.AutoActionDelayMs -gt 0) {
-                Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+    # Reentrancy guard: Hide-CaptureFlash (called from Save-RegionScreenshot)
+    # pumps the message queue with Application.DoEvents(), and the
+    # duplicate-frame prompt pumps it too via ShowDialog() - both run while
+    # this very Tick handler is still on the call stack. A WinForms Timer's
+    # pending WM_TIMER is delivered by that same pump like any other
+    # message, so without this guard a slow tick let autoCaptureTimer fire
+    # again re-entrantly before the first tick finished. Each reentrant
+    # call saved its own shot and opened its own duplicate-frame dialog,
+    # which is what looked like the dialog flashing and immediately closing
+    # as each newer, overlapping call tore down and replaced the one before
+    # it. Stopping the timer up front (before anything that can pump
+    # messages) and re-arming only once this tick is fully done - and the
+    # busy flag as a belt-and-braces check - keeps ticks strictly
+    # sequential.
+    if ($script:autoCaptureTickBusy) { return }
+    $script:autoCaptureTickBusy = $true
+    try {
+        $script:autoCaptureTimer.Stop()
+
+        $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
+        $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
+        $pausedByDuplicateCheck = $false
+        if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
+            $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
+            Show-CaptureFlash -Rect $script:captureRect
+            $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
+            if (-not $pausedByDuplicateCheck) {
+                if ($script:Config.AutoActionDelayMs -gt 0) {
+                    Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+                }
+                Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
             }
         }
-        $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
-        Show-CaptureFlash -Rect $script:captureRect
-        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
+        else {
+            if ($hasAction) {
+                Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
+                if ($script:Config.AutoActionDelayMs -gt 0) {
+                    Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+                }
+            }
+            $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
+            Show-CaptureFlash -Rect $script:captureRect
+            $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
+        }
+
+        # Test-DuplicateFrameAndMaybePause already left the timer in the
+        # right state (paused-and-resumed, or fully stopped via
+        # Stop-AutoCapture) when it returns $true - only re-arm here for
+        # the normal, non-paused case.
+        if (-not $pausedByDuplicateCheck) {
+            $script:autoCaptureTimer.Start()
+        }
+    }
+    finally {
+        $script:autoCaptureTickBusy = $false
     }
 })
 
