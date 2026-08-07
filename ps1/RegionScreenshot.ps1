@@ -1216,8 +1216,23 @@ function Show-DuplicateFramePrompt {
     $btnContinue.DialogResult = [System.Windows.Forms.DialogResult]::No
     $dlg.Controls.Add($btnContinue)
 
-    $dlg.AcceptButton = $btnContinue
-    $dlg.CancelButton = $btnContinue
+    # Deliberately NOT wired to AcceptButton/CancelButton, and keystrokes
+    # are swallowed below - this has to be a real mouse click. The whole
+    # point of auto-capture's "auto-press key" option is holding/spamming
+    # a key (e.g. Space or Enter to page through something); if Enter
+    # closed this dialog, a still-held key would auto-repeat straight into
+    # whichever button had focus the instant this dialog appeared and
+    # dismiss it before anyone could read it - which looked exactly like
+    # "the notification flashes and capture just continues".
+    $dlg.KeyPreview = $true
+    $dlg.Add_KeyDown({
+        param($s, $e)
+        $e.Handled         = $true
+        $e.SuppressKeyPress = $true
+    })
+    $dlg.Add_Shown({
+        $dlg.Activate()
+    })
 
     $result = $dlg.ShowDialog()
     $dlg.Dispose()
@@ -1249,14 +1264,24 @@ function Test-DuplicateFrameAndMaybePause {
 
     $isDuplicate = $false
     $similarity  = 0.0
-    if ($script:lastAutoCaptureBitmap) {
-        $avgDiff = [RegionTool.ImageDiff]::AverageDiff($script:lastAutoCaptureBitmap, $newBmp)
-        if ($avgDiff -ge 0) {
-            $similarity = 100.0 - [Math]::Min(100.0, ($avgDiff / 255.0) * 100.0)
-            if ($similarity -ge [double]$script:Config.AutoCaptureDuplicateThresholdPercent) {
-                $isDuplicate = $true
+    try {
+        if ($script:lastAutoCaptureBitmap) {
+            $avgDiff = [RegionTool.ImageDiff]::AverageDiff($script:lastAutoCaptureBitmap, $newBmp)
+            if ($avgDiff -ge 0) {
+                $similarity = 100.0 - [Math]::Min(100.0, ($avgDiff / 255.0) * 100.0)
+                if ($similarity -ge [double]$script:Config.AutoCaptureDuplicateThresholdPercent) {
+                    $isDuplicate = $true
+                }
             }
         }
+    }
+    catch {
+        # Don't let a comparison failure escape to the script-level trap -
+        # that would abandon this tick with $newBmp never handed off to
+        # $script:lastAutoCaptureBitmap (leaking its file handle) and the
+        # timer's state unclear. Just skip the pause for this shot.
+        Write-Log "WARNING: duplicate-frame comparison failed: $($_.Exception.Message)"
+        $isDuplicate = $false
     }
 
     Clear-LastAutoCaptureBitmap
