@@ -1164,6 +1164,15 @@ function Send-KeyCombo {
 # ---------------------------------------------------------------------------
 $script:lastAutoCaptureBitmap = $null
 
+# Hard re-entrancy latch: while the duplicate-frame prompt is up, this is
+# $true and the Tick handler bails out immediately as its very first
+# statement - before touching the screen, disk, or the action key. This
+# doesn't rely on Timer.Stop() alone actually preventing further Tick
+# delivery (which turned out not to be safe in this host process), so it
+# guarantees no further shots/keypresses happen no matter what re-fires
+# the timer while the modal is open.
+$script:duplicatePromptActive = $false
+
 function Clear-LastAutoCaptureBitmap {
     # [System.Drawing.Bitmap]::FromFile keeps the source file locked for as
     # long as the Bitmap is alive, so this must run before anything else
@@ -1290,10 +1299,20 @@ function Test-DuplicateFrameAndMaybePause {
     if (-not $isDuplicate) { return $false }
 
     Write-Log ("Auto-capture paused: shot is {0:N1}% similar to the previous one (threshold {1}%)." -f $similarity, $script:Config.AutoCaptureDuplicateThresholdPercent)
+    $script:duplicatePromptActive = $true
     $script:autoCaptureTimer.Stop()
+    $script:autoCaptureTimer.Enabled = $false
     $itemAutoCapture.Text = 'Auto-Capture Paused (similar frame)'
 
-    $shouldStop = Show-DuplicateFramePrompt -SimilarityPercent $similarity
+    $shouldStop = $false
+    try {
+        $shouldStop = Show-DuplicateFramePrompt -SimilarityPercent $similarity
+    }
+    finally {
+        # Must clear the latch no matter what, or a thrown/cancelled prompt
+        # would leave auto-capture permanently stuck.
+        $script:duplicatePromptActive = $false
+    }
 
     if ($shouldStop) {
         Write-Log 'Auto-capture stopped by user from duplicate-frame prompt.'
@@ -1315,63 +1334,29 @@ function Test-DuplicateFrameAndMaybePause {
 # between the key press and the screenshot.
 # ---------------------------------------------------------------------------
 $script:autoCaptureTimer = New-Object System.Windows.Forms.Timer
-$script:autoCaptureTickBusy = $false
 $script:autoCaptureTimer.Add_Tick({
-    # Reentrancy guard: Hide-CaptureFlash (called from Save-RegionScreenshot)
-    # pumps the message queue with Application.DoEvents(), and the
-    # duplicate-frame prompt pumps it too via ShowDialog() - both run while
-    # this very Tick handler is still on the call stack. A WinForms Timer's
-    # pending WM_TIMER is delivered by that same pump like any other
-    # message, so without this guard a slow tick let autoCaptureTimer fire
-    # again re-entrantly before the first tick finished. Each reentrant
-    # call saved its own shot and opened its own duplicate-frame dialog,
-    # which is what looked like the dialog flashing and immediately closing
-    # as each newer, overlapping call tore down and replaced the one before
-    # it. Stopping the timer up front (before anything that can pump
-    # messages) and re-arming only once this tick is fully done - and the
-    # busy flag as a belt-and-braces check - keeps ticks strictly
-    # sequential.
-    if ($script:autoCaptureTickBusy) { return }
-    $script:autoCaptureTickBusy = $true
-    try {
-        $script:autoCaptureTimer.Stop()
-
-        $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
-        $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
-        $pausedByDuplicateCheck = $false
-        if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
-            $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
-            Show-CaptureFlash -Rect $script:captureRect
-            $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
-            if (-not $pausedByDuplicateCheck) {
-                if ($script:Config.AutoActionDelayMs -gt 0) {
-                    Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
-                }
-                Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
-            }
+    if ($script:duplicatePromptActive) { return }
+    $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
+    $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
+    if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
+        $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
+        Show-CaptureFlash -Rect $script:captureRect
+        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
+        if ($script:Config.AutoActionDelayMs -gt 0) {
+            Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
         }
-        else {
-            if ($hasAction) {
-                Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
-                if ($script:Config.AutoActionDelayMs -gt 0) {
-                    Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
-                }
-            }
-            $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
-            Show-CaptureFlash -Rect $script:captureRect
-            $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
-        }
-
-        # Test-DuplicateFrameAndMaybePause already left the timer in the
-        # right state (paused-and-resumed, or fully stopped via
-        # Stop-AutoCapture) when it returns $true - only re-arm here for
-        # the normal, non-paused case.
-        if (-not $pausedByDuplicateCheck) {
-            $script:autoCaptureTimer.Start()
-        }
+        Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
     }
-    finally {
-        $script:autoCaptureTickBusy = $false
+    else {
+        if ($hasAction) {
+            Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
+            if ($script:Config.AutoActionDelayMs -gt 0) {
+                Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+            }
+        }
+        $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
+        Show-CaptureFlash -Rect $script:captureRect
+        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
     }
 })
 
@@ -1568,6 +1553,7 @@ function Stop-AutoCapture {
 }
 
 $itemAutoCapture.Add_Click({
+    if ($script:duplicatePromptActive) { return }
     if ($script:autoCaptureTimer.Enabled) { Stop-AutoCapture } else { Start-AutoCapture }
 })
 
@@ -1674,7 +1660,7 @@ $pollTimer.Add_Tick({
     $script:toggleHotkeyWasDown = $toggleDown
 
     $toggleAutoCaptureDown = Test-HotkeyCombo -Codes $script:Config.ToggleAutoCaptureHotkeyVKCodes
-    if ($toggleAutoCaptureDown -and -not $script:toggleAutoCaptureHotkeyWasDown) {
+    if ($toggleAutoCaptureDown -and -not $script:toggleAutoCaptureHotkeyWasDown -and -not $script:duplicatePromptActive) {
         if ($script:autoCaptureTimer.Enabled) { Stop-AutoCapture } else { Start-AutoCapture }
     }
     $script:toggleAutoCaptureHotkeyWasDown = $toggleAutoCaptureDown
