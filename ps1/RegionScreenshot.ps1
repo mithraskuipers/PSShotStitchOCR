@@ -106,6 +106,32 @@ if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
 }
 
 # ---------------------------------------------------------------------------
+# Single-instance guard
+# ---------------------------------------------------------------------------
+# If this tool is launched a second time (e.g. re-running "Start Screenshot
+# Tool.bat" to try a config change without noticing the tray icon from the
+# last run is still sitting there), the OLDER instance's auto-capture timer
+# keeps running completely unaffected by anything you click in the NEWER
+# one's window - including its duplicate-frame pause dialog. That looks
+# exactly like "the pause dialog does nothing, capturing continues no
+# matter what I click", because the captures you're seeing keep happening
+# are coming from that orphaned older process, not the one you're looking
+# at. A named Mutex is the standard way to detect that and refuse to start
+# a second instance instead of letting two silently run side by side.
+$script:singleInstanceMutex = New-Object System.Threading.Mutex($false, 'Local\RegionScreenshotTool_SingleInstance_Mutex')
+if (-not $script:singleInstanceMutex.WaitOne(0, $false)) {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show(
+        "Region Screenshot Tool is already running (check your system tray - it may be hidden in the overflow area).`n`nOnly one instance can run at a time, since a second one would keep capturing in the background even while you're looking at this one, invisibly ignoring pauses and settings changes made here.`n`nIf you don't see a tray icon, open Task Manager > Details tab and look for a 'powershell.exe' (or 'pwsh.exe') process - that's the running instance. End it there if you want to start fresh, then run this tool again.",
+        'Region Screenshot Tool - Already Running',
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    ) | Out-Null
+    exit 1
+}
+Write-Host "Region Screenshot Tool starting. PID=$PID (check Task Manager > Details for this PID if you ever need to confirm which process is running)."
+
+# ---------------------------------------------------------------------------
 # DPI awareness
 # ---------------------------------------------------------------------------
 # Without this, Windows treats the process as DPI-unaware and silently
@@ -159,6 +185,9 @@ Add-Type -Namespace RegionTool -Name Native -MemberDefinition @"
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
 "@
 
 # A borderless flash window that never steals focus or shows in the
@@ -412,6 +441,8 @@ $script:DefaultConfig = [ordered]@{
     AutoLaunchReviewOnStop      = $true
     AutoCaptureDuplicateDetectionEnabled = $true
     AutoCaptureDuplicateThresholdPercent = 99.0   # pause + prompt when a shot is at least this similar to the previous one
+    AutoCaptureDuplicateCooldownMs = 5000   # after clicking Continue on the prompt, don't re-check for duplicates again until this much time has passed - prevents getting asked on every single tick while the captured content still hasn't changed
+    AutoCaptureDuplicatePromptArmDelayMs = 700   # the prompt's Stop/Continue buttons stay disabled for this long after it appears, so a click or key release already in flight when it pops up can't land on either one
 }
 
 function Get-ToolConfig {
@@ -558,6 +589,16 @@ function Get-ToolConfig {
     if ($dupThreshold -le 0) { $dupThreshold = 99.0 }
     if ($dupThreshold -gt 100) { $dupThreshold = 100.0 }
     $cfg.AutoCaptureDuplicateThresholdPercent = $dupThreshold
+
+    $dupCooldown = 0
+    [void][int]::TryParse([string]$cfg.AutoCaptureDuplicateCooldownMs, [ref]$dupCooldown)
+    if ($dupCooldown -lt 0) { $dupCooldown = 5000 }
+    $cfg.AutoCaptureDuplicateCooldownMs = $dupCooldown
+
+    $dupArmDelay = 0
+    [void][int]::TryParse([string]$cfg.AutoCaptureDuplicatePromptArmDelayMs, [ref]$dupArmDelay)
+    if ($dupArmDelay -lt 0) { $dupArmDelay = 700 }
+    $cfg.AutoCaptureDuplicatePromptArmDelayMs = $dupArmDelay
 
     return $cfg
 }
@@ -755,6 +796,17 @@ function Save-RegionScreenshot {
         # together, ready to hand off to the Review & Stitch tool.
         [string]$Folder = $script:Config.SaveLocation
     )
+
+    # THE VERY FIRST THING checked, independent of whatever called this:
+    # if the stop flag is 1, NOTHING captures, full stop. This doesn't
+    # rely on whichever caller (auto-capture tick, manual hotkey, clipboard
+    # hotkey, anything else) remembering to check first - it's enforced
+    # right here too, the one place every capture path funnels through, so
+    # a file can never hit disk while acStopFlag is 1.
+    if ($script:acStopFlag -eq 1) {
+        Write-Log 'Capture blocked: stop flag is 1 (duplicate-frame prompt is open).'
+        return $null
+    }
 
     # Make sure any flash from a previous capture is fully gone before we
     # read pixels off the screen, or a rapid second/third capture would
@@ -1100,6 +1152,7 @@ $itemExit         = $menu.Items.Add('Exit')
 $trayIcon.ContextMenuStrip = $menu
 
 $itemReselect.Add_Click({
+    if ($script:acStopFlag -eq 1) { return }
     $newRect = Select-Region
     if ($newRect) {
         $script:captureRect = $newRect
@@ -1110,19 +1163,23 @@ $itemReselect.Add_Click({
 })
 
 $itemToggleBorder.Add_Click({
+    if ($script:acStopFlag -eq 1) { return }
     $visible = Toggle-RegionBorder
     $itemToggleBorder.Text = if ($visible) { 'Hide Region Border' } else { 'Show Region Border' }
 })
 
 $itemOpenDir.Add_Click({
+    if ($script:acStopFlag -eq 1) { return }
     Start-Process explorer.exe $script:Config.SaveLocation
 })
 
 $itemReviewLast.Add_Click({
+    if ($script:acStopFlag -eq 1) { return }
     if ($script:lastSessionFolder) { Start-ReviewTool -SourceFolder $script:lastSessionFolder }
 })
 
 $itemReviewOpen.Add_Click({
+    if ($script:acStopFlag -eq 1) { return }
     Start-ReviewTool -SourceFolder $script:Config.SaveLocation
 })
 
@@ -1139,6 +1196,10 @@ function Send-KeyCombo {
     #>
     param([int[]]$Codes)
     if (-not $Codes -or $Codes.Count -eq 0) { return }
+    if ($script:acStopFlag -eq 1) {
+        Write-Log 'Auto-action key send blocked: stop flag is 1 (duplicate-frame prompt is open).'
+        return
+    }
     $MAPVK_VK_TO_VSC = 0
     $KEYEVENTF_KEYUP = 0x0002
     foreach ($vk in $Codes) {
@@ -1160,17 +1221,40 @@ function Send-KeyCombo {
 # configured auto-keypress) pauses and the user is asked whether to stop or
 # keep going - useful for noticing when whatever's being captured has
 # stalled (e.g. a page finished loading, or a game froze) instead of
-# quietly filling a session folder with near-identical shots.
+# quietly filling a session folder with near-identical shots. Choosing
+# Continue starts a AutoCaptureDuplicateCooldownMs grace period during
+# which further matches update the reference frame as normal but do NOT
+# re-trigger the prompt, so it doesn't ask again on every single tick
+# while the content genuinely hasn't changed yet.
+#
+# The prompt dialog itself (Show-DuplicateFramePrompt, below) is written
+# so that a button click is the ONLY thing that can ever close it - see
+# the comments on that function for why that's the actual fix for "the
+# popup disappears and capturing just continues anyway".
 # ---------------------------------------------------------------------------
 $script:lastAutoCaptureBitmap = $null
 
-# Set to $true for the entire time the duplicate-frame prompt is on
-# screen (from just before it's shown until right after it closes) - the
-# poll timer checks this and skips manual/clipboard capture, region
-# move/resize, and the toggle hotkeys while it's up, so literally nothing
-# else can fire while the question is on screen. The stop hotkey is the
-# one exception and always still works.
-$script:duplicatePromptOpen = $false
+# After the user clicks Continue on the duplicate-frame prompt, this is set
+# to "now + AutoCaptureDuplicateCooldownMs". Until that time passes, new
+# shots still get compared and lastAutoCaptureBitmap still gets updated
+# normally each tick, but a match is NOT allowed to trigger the prompt
+# again - otherwise clicking Continue while the captured content genuinely
+# hasn't changed yet (a page still loading, a paused video, a static
+# screen) would just compare the next shot against the one that was
+# already flagged - which is every bit as similar - and pop the exact same
+# prompt again on the very next tick, for as long as nothing changes.
+$script:duplicateCheckCooldownUntil = [DateTime]::MinValue
+
+# The stop flag. 0 = auto-capture is allowed to run normally. 1 = a
+# duplicate frame was just spotted and auto-capture (plus manual/clipboard
+# capture, region move/resize, and the toggle hotkeys) must NOT run at all
+# until the user answers the prompt - it's the single source of truth for
+# "are we allowed to capture right now", checked as the very first thing
+# before any of those actions do anything else. It only ever goes 0 -> 1
+# when Test-DuplicateFrameAndMaybePause spots a duplicate, and 1 -> 0 once
+# the user has answered (either choice). The stop hotkey is the one
+# exception and always still works regardless of this flag.
+$script:acStopFlag = 0
 
 function Clear-LastAutoCaptureBitmap {
     # [System.Drawing.Bitmap]::FromFile keeps the source file locked for as
@@ -1185,84 +1269,197 @@ function Clear-LastAutoCaptureBitmap {
 
 function Show-DuplicateFramePrompt {
     <#
-        Small topmost dialog telling the user the last two auto-captured
-        shots were nearly identical, with Stop / Continue buttons. Blocks
-        (ShowDialog) until the user picks one; returns $true for Stop,
-        $false for Continue. The auto-capture timer is always stopped by
-        the caller before this shows, so nothing else fires while it's up.
+        Modal dialog asking whether to stop or continue auto-capture after
+        a near-duplicate frame was detected. Blocks (ShowDialog) until it
+        closes; returns $true for Stop, $false for Continue. The
+        auto-capture timer is always stopped by the caller before this is
+        shown, so no new capture can fire while it's up.
+
+        This version fixes the actual root cause of "the popup shows up
+        and disappears immediately, capturing just continues": closing a
+        WinForms dialog shown via ShowDialog() through anything OTHER than
+        a control that explicitly sets DialogResult - the system Close (X)
+        button, Alt+F4, "Close window" from the taskbar, etc. - leaves
+        DialogResult at its default of Cancel once the dialog finishes
+        closing. The previous version of this dialog only ever treated
+        DialogResult.Yes as "Stop", so ANY uncontrolled close silently
+        took the Continue branch and got logged as if the user had
+        clicked Continue - even though nobody had touched a button. That
+        matches exactly what the logs showed: a "resumed by user" line
+        appearing every time, on a schedule no human was actually driving.
+
+        Three changes close that hole and the ones next to it:
+
+          1. ControlBox = $false removes the system Close (X) button
+             entirely, and FormClosing refuses to let the dialog close at
+             all unless $script:_dupPromptAnswer has already been set by
+             one of the two button Click handlers below. Nothing else in
+             this function - or anywhere else - ever sets that variable.
+             That makes an explicit click the only possible way out,
+             full stop.
+          2. Both buttons stay disabled for AutoCaptureDuplicatePromptArmDelayMs
+             (default 700ms) after the dialog appears, and the message
+             queue is drained with a couple of DoEvents() calls first.
+             That's the guard against a click or key-release that was
+             already in flight the instant this dialog popped up - it
+             can no longer land on a button before the user has actually
+             had a chance to see the dialog.
+          3. The dialog explicitly grabs OS input focus (SetForegroundWindow
+             + Activate) rather than relying on TopMost alone, and sits in
+             the bottom-right corner instead of dead-center - screen-center
+             is exactly where a lot of "Next" / "Continue" UI in whatever's
+             being captured tends to sit, so keeping this dialog away from
+             there means it's not competing for the same clicks.
+
+        Keystrokes are still swallowed entirely (KeyDown/KeyUp both
+        handled, buttons non-tab-stop) for the same reason as before: the
+        auto-press feature can hold or repeat a key, and a stray KeyUp
+        reaching a focused button could otherwise click it unattended.
+        With ControlBox off and FormClosing guarding everything else, that
+        swallowing is now genuinely just a keyboard-input guard rather
+        than the only thing standing between this dialog and an
+        accidental dismissal.
     #>
     param([Parameter(Mandatory)][double]$SimilarityPercent)
 
+    $armDelayMs = [Math]::Max(0, [int]$script:Config.AutoCaptureDuplicatePromptArmDelayMs)
+    $simText    = $SimilarityPercent.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
+
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text            = 'Region Screenshot Tool'
+    $dlg.Text            = 'Region Screenshot Tool - Auto-Capture Paused'
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox     = $false
     $dlg.MinimizeBox     = $false
+    $dlg.ControlBox      = $false
     $dlg.ShowInTaskbar   = $true
     $dlg.TopMost         = $true
-    $dlg.StartPosition   = 'CenterScreen'
-    $dlg.ClientSize      = New-Object System.Drawing.Size(400, 140)
+    $dlg.StartPosition   = 'Manual'
+    $dlg.ClientSize      = New-Object System.Drawing.Size(400, 150)
+
+    # Bottom-right corner of the working area, deliberately not
+    # CenterScreen - see the function comment above.
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $dlg.Location = New-Object System.Drawing.Point(
+        ($wa.Right - $dlg.Width - 24), ($wa.Bottom - $dlg.Height - 24))
 
     $lbl = New-Object System.Windows.Forms.Label
-    $simText = $SimilarityPercent.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
     $lbl.Text     = "Current screenshot very similar ($simText%) to last screenshot.`n`nStop auto-capture, or continue?"
     $lbl.Location = New-Object System.Drawing.Point(18, 16)
-    $lbl.Size     = New-Object System.Drawing.Size(364, 70)
+    $lbl.Size     = New-Object System.Drawing.Size(364, 62)
     $dlg.Controls.Add($lbl)
 
+    $lblArming = New-Object System.Windows.Forms.Label
+    $lblArming.Text      = 'One moment...'
+    $lblArming.ForeColor = [System.Drawing.Color]::DimGray
+    $lblArming.Location  = New-Object System.Drawing.Point(18, 80)
+    $lblArming.Size      = New-Object System.Drawing.Size(200, 18)
+    $lblArming.Visible   = ($armDelayMs -gt 0)
+    $dlg.Controls.Add($lblArming)
+
     $btnStop = New-Object System.Windows.Forms.Button
-    $btnStop.Text         = 'Stop'
-    $btnStop.Size         = New-Object System.Drawing.Size(110, 30)
-    $btnStop.Location     = New-Object System.Drawing.Point(160, 92)
-    $btnStop.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    $btnStop.Text     = 'Stop'
+    $btnStop.Size     = New-Object System.Drawing.Size(110, 30)
+    $btnStop.Location = New-Object System.Drawing.Point(160, 104)
+    $btnStop.Enabled  = ($armDelayMs -le 0)
+    $btnStop.TabStop  = $false
     $dlg.Controls.Add($btnStop)
 
     $btnContinue = New-Object System.Windows.Forms.Button
-    $btnContinue.Text         = 'Continue'
-    $btnContinue.Size         = New-Object System.Drawing.Size(110, 30)
-    $btnContinue.Location     = New-Object System.Drawing.Point(276, 92)
-    $btnContinue.DialogResult = [System.Windows.Forms.DialogResult]::No
+    $btnContinue.Text     = 'Continue'
+    $btnContinue.Size     = New-Object System.Drawing.Size(110, 30)
+    $btnContinue.Location = New-Object System.Drawing.Point(276, 104)
+    $btnContinue.Enabled  = ($armDelayMs -le 0)
+    $btnContinue.TabStop  = $false
     $dlg.Controls.Add($btnContinue)
 
-    # Deliberately NOT wired to AcceptButton/CancelButton, and keystrokes
-    # are swallowed below - this has to be a real mouse click. The whole
-    # point of auto-capture's "auto-press key" option is holding/spamming
-    # a key (e.g. Space or Enter to page through something); if Enter
-    # closed this dialog, a still-held key would auto-repeat straight into
-    # whichever button had focus the instant this dialog appeared and
-    # dismiss it before anyone could read it - which looked exactly like
-    # "the notification flashes and capture just continues".
-    #
-    # KeyDown alone is NOT enough: a focused Button fires its Click on
-    # KeyUp of Space, and Form.KeyPreview only lets the form's own KeyUp
-    # handler swallow that if one is actually wired up - with only KeyDown
-    # hooked, the KeyUp for Space sailed straight through to whichever
-    # button had focus and clicked it. That's what was actually closing
-    # the dialog by itself: a key held (or auto-pressed) for the auto
-    # advance action got released while this dialog happened to be open,
-    # and its lone KeyUp silently activated the focused button. Swallowing
-    # KeyUp too closes that gap. Buttons are also made non-tab-stop so
-    # keyboard focus never lands on one in the first place, as a second
-    # layer of defense.
+    # The single source of truth for how this dialog closed. Script-scoped
+    # (rather than a local captured by a closure) so both button handlers,
+    # FormClosing, and the code right after ShowDialog() all see the same
+    # value. Only 'Stop' or 'Continue', set only by the two Click handlers
+    # immediately below, ever get written here.
+    $script:_dupPromptAnswer   = 'None'
+    $script:_dupPromptShownAt  = $null
+
+    $btnStop.Add_Click({
+        $script:_dupPromptAnswer = 'Stop'
+        $dlg.Close()
+    }.GetNewClosure())
+    $btnContinue.Add_Click({
+        $script:_dupPromptAnswer = 'Continue'
+        $dlg.Close()
+    }.GetNewClosure())
+
     $dlg.KeyPreview = $true
     $dlg.Add_KeyDown({
         param($s, $e)
-        $e.Handled         = $true
+        $e.Handled          = $true
         $e.SuppressKeyPress = $true
     })
     $dlg.Add_KeyUp({
         param($s, $e)
         $e.Handled = $true
     })
-    $btnStop.TabStop     = $false
-    $btnContinue.TabStop = $false
-    $dlg.Add_Shown({
-        $dlg.Activate()
-    })
 
-    $result = $dlg.ShowDialog()
+    # The actual fix: refuse every close that didn't come from one of the
+    # two buttons above (see the function comment for the full story).
+    $dlg.Add_FormClosing({
+        param($s, $e)
+        if ($script:_dupPromptAnswer -eq 'None') {
+            $e.Cancel = $true
+        }
+    }.GetNewClosure())
+
+    $dlg.Add_Shown({
+        $script:_dupPromptShownAt = Get-Date
+        Write-Log "Duplicate-frame prompt shown ($simText% similar)."
+
+        [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
+        $dlg.Activate()
+        $dlg.Focus()
+
+        # Drain anything already sitting in the message queue - a stray
+        # click or key release in flight the instant this dialog appeared -
+        # before the arming timer (or immediate enable, if the delay is 0)
+        # makes the buttons clickable.
+        [System.Windows.Forms.Application]::DoEvents()
+        [System.Windows.Forms.Application]::DoEvents()
+
+        if ($armDelayMs -gt 0) {
+            $armTimer = New-Object System.Windows.Forms.Timer
+            $armTimer.Interval = $armDelayMs
+            $armTimer.Add_Tick({
+                $armTimer.Stop()
+                $armTimer.Dispose()
+                if (-not $dlg.IsDisposed -and $script:_dupPromptAnswer -eq 'None') {
+                    $btnStop.Enabled     = $true
+                    $btnContinue.Enabled = $true
+                    $lblArming.Visible   = $false
+                    Write-Log 'Duplicate-frame prompt armed - now accepting clicks.'
+                }
+            }.GetNewClosure())
+            $armTimer.Start()
+        }
+    }.GetNewClosure())
+
+    [void]$dlg.ShowDialog()
+
+    $elapsedMs = if ($script:_dupPromptShownAt) {
+        [int]((Get-Date) - $script:_dupPromptShownAt).TotalMilliseconds
+    } else { -1 }
+    $answer = $script:_dupPromptAnswer
     $dlg.Dispose()
-    return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+
+    Write-Log "Duplicate-frame prompt closed after ${elapsedMs}ms. Answer=$answer"
+
+    if ($answer -eq 'None') {
+        # Should be structurally unreachable now - FormClosing cancels
+        # every close attempt until one of the two buttons sets the
+        # answer - but if it somehow still happens, fail safe by treating
+        # it as Stop rather than silently letting capture continue.
+        Write-Log 'WARNING: duplicate-frame prompt closed with no recorded button click. Stopping auto-capture as a safety fallback.'
+        return $true
+    }
+    return ($answer -eq 'Stop')
 }
 
 function Test-DuplicateFrameAndMaybePause {
@@ -1315,10 +1512,37 @@ function Test-DuplicateFrameAndMaybePause {
 
     if (-not $isDuplicate) { return $false }
 
+    if ((Get-Date) -lt $script:duplicateCheckCooldownUntil) {
+        # Still within the post-Continue cooldown: this shot is a match,
+        # but we were just told to stop asking about matches for a while.
+        # The reference bitmap above was still updated as normal, so once
+        # the cooldown ends the next comparison is against this shot, not
+        # a stale one from before the cooldown started.
+        Write-Log ("Duplicate-frame prompt suppressed: shot is {0:N1}% similar, but still within the {1}ms cooldown after the last Continue." -f $similarity, $script:Config.AutoCaptureDuplicateCooldownMs)
+        return $false
+    }
+
     Write-Log ("Auto-capture paused: shot is {0:N1}% similar to the previous one (threshold {1}%)." -f $similarity, $script:Config.AutoCaptureDuplicateThresholdPercent)
     $script:autoCaptureTimer.Stop()
-    $script:duplicatePromptOpen = $true
+    $script:acStopFlag = 1
     $itemAutoCapture.Text = 'Auto-Capture Paused (similar frame)'
+
+    # Disable the tray's right-click menu for the duration of the prompt.
+    # ShowDialog() with no Owner set does NOT disable sibling top-level
+    # windows like a NotifyIcon's ContextMenuStrip - only the dialog
+    # itself is modal. Without this, "Start/Stop Auto-Capture",
+    # "Reselect Region", etc. on the tray menu stayed clickable the
+    # entire time this prompt was on screen: clicking "Start Auto-
+    # Capture" there while paused (autoCaptureRunning is still $true at
+    # this point - it's only flipped by the choice made ON this prompt)
+    # restarted the timer immediately, producing exactly the reported
+    # "the popup shows up and capturing just continues anyway" behaviour
+    # with no timer race or second process needed at all. pollTimer
+    # itself is deliberately left running - its own tick handler already
+    # checks $script:acStopFlag and skips everything except the stop
+    # hotkey, which by design must keep working so the tool can always
+    # be shut down cleanly even while this prompt is up.
+    $menu.Enabled = $false
 
     try {
         $shouldStop = Show-DuplicateFramePrompt -SimilarityPercent $similarity
@@ -1328,13 +1552,19 @@ function Test-DuplicateFrameAndMaybePause {
             Stop-AutoCapture
         }
         else {
-            $script:autoCaptureTimer.Start()
+            # Do NOT start autoCaptureTimer here. The outer tick handler
+            # re-arms it (only if autoCaptureRunning is still true) after
+            # this function returns. Starting here would race with any
+            # already-queued WM_TIMER messages and could let a late tick
+            # run while the prompt was still closing.
+            $script:duplicateCheckCooldownUntil = (Get-Date).AddMilliseconds([double]$script:Config.AutoCaptureDuplicateCooldownMs)
             $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
-            Write-Log 'Auto-capture resumed by user from duplicate-frame prompt.'
+            Write-Log ("Auto-capture resumed by user from duplicate-frame prompt. Duplicate prompt suppressed for the next {0}ms." -f $script:Config.AutoCaptureDuplicateCooldownMs)
         }
     }
     finally {
-        $script:duplicatePromptOpen = $false
+        $menu.Enabled = $true
+        $script:acStopFlag = 0
     }
     return $true
 }
@@ -1348,7 +1578,25 @@ function Test-DuplicateFrameAndMaybePause {
 # ---------------------------------------------------------------------------
 $script:autoCaptureTimer = New-Object System.Windows.Forms.Timer
 $script:autoCaptureTickBusy = $false
+# Desired-state flag for auto-capture. Timer.Enabled is temporarily false
+# for the whole duration of every tick (we Stop up front so no further
+# ticks are scheduled while we work), and a pending WM_TIMER that was
+# already in the queue when Stop was called can still raise the Tick
+# event afterward. Relying on Enabled alone therefore lets "zombie"
+# ticks run after the user has chosen Stop on the duplicate-frame
+# prompt - exactly the "popup flashes then capturing continues"
+# behaviour. This flag is only flipped by Start-AutoCapture /
+# Stop-AutoCapture and is what late/pending ticks consult.
+$script:autoCaptureRunning = $false
 $script:autoCaptureTimer.Add_Tick({
+    # THE VERY FIRST THING every tick does, before anything else runs:
+    # check the stop flag. 0 = allowed to capture, 1 = a duplicate frame
+    # was already spotted and we are waiting on the user - in which case
+    # this tick does nothing at all and returns immediately.
+    if ($script:acStopFlag -eq 1) { return }
+
+    # Everything below this line only ever runs when acStopFlag is 0.
+    #
     # Reentrancy guard: Hide-CaptureFlash (called from Save-RegionScreenshot)
     # pumps the message queue with Application.DoEvents(), and the
     # duplicate-frame prompt pumps it too via ShowDialog() - both run while
@@ -1363,6 +1611,12 @@ $script:autoCaptureTimer.Add_Tick({
     # messages) and re-arming only once this tick is fully done - and the
     # busy flag as a belt-and-braces check - keeps ticks strictly
     # sequential.
+    #
+    # autoCaptureRunning is checked next so that any WM_TIMER messages
+    # that were already queued when the user chose Stop on the duplicate
+    # prompt (or when Stop-AutoCapture ran for any other reason) exit
+    # immediately instead of capturing one more frame.
+    if (-not $script:autoCaptureRunning) { return }
     if ($script:autoCaptureTickBusy) { return }
     $script:autoCaptureTickBusy = $true
     try {
@@ -1394,11 +1648,12 @@ $script:autoCaptureTimer.Add_Tick({
             $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
         }
 
-        # Test-DuplicateFrameAndMaybePause already left the timer in the
-        # right state (paused-and-resumed, or fully stopped via
-        # Stop-AutoCapture) when it returns $true - only re-arm here for
-        # the normal, non-paused case.
-        if (-not $pausedByDuplicateCheck) {
+        # Re-arm only if auto-capture is still supposed to be running AND
+        # the stop flag didn't just get set to 1 by the call above. Both
+        # are checked here (not just autoCaptureRunning) so this can never
+        # restart the timer while acStopFlag is 1, no matter what order
+        # Test-DuplicateFrameAndMaybePause's internals end up running in.
+        if ($script:autoCaptureRunning -and $script:acStopFlag -eq 0) {
             $script:autoCaptureTimer.Start()
         }
     }
@@ -1557,8 +1812,11 @@ function Start-AutoCapture {
         $script:currentSessionFolder = $null
     }
     # A new session's first shot shouldn't be compared against whatever the
-    # last session's last shot was.
+    # last session's last shot was, and shouldn't inherit any cooldown left
+    # over from a previous session's duplicate-frame prompt.
     Clear-LastAutoCaptureBitmap
+    $script:duplicateCheckCooldownUntil = [DateTime]::MinValue
+    $script:autoCaptureRunning = $true
     $script:autoCaptureTimer.Interval = [Math]::Max(500, [int]$script:Config.AutoCaptureIntervalMs)
     $script:autoCaptureTimer.Start()
     $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
@@ -1567,6 +1825,7 @@ function Start-AutoCapture {
 }
 
 function Stop-AutoCapture {
+    $script:autoCaptureRunning = $false
     $script:autoCaptureTimer.Stop()
     $itemAutoCapture.Text = 'Start Auto-Capture'
 
@@ -1600,12 +1859,28 @@ function Stop-AutoCapture {
 }
 
 $itemAutoCapture.Add_Click({
-    if ($script:autoCaptureTimer.Enabled) { Stop-AutoCapture } else { Start-AutoCapture }
+    # This is the click handler that mattered most: while the
+    # duplicate-frame prompt is open, $script:autoCaptureRunning is still
+    # $true (it's only flipped by the user's choice on the prompt itself,
+    # via Stop-AutoCapture), so without this guard, clicking this tray
+    # menu item during the pause called Stop-AutoCapture (merely
+    # confusing) - but on a SECOND click (or on a re-entrant handler in
+    # older builds of this tool that toggled differently) could call
+    # Start-AutoCapture and restart the timer while the prompt was still
+    # up. $menu.Enabled being set to $false during the pause (see
+    # Test-DuplicateFrameAndMaybePause) should already prevent this from
+    # being reachable at all, but this check is kept as a second,
+    # independent line of defense in case Windows delivers the click
+    # anyway (e.g. because the menu was already open the instant Enabled
+    # flipped).
+    if ($script:acStopFlag -eq 1) { return }
+    if ($script:autoCaptureRunning) { Stop-AutoCapture } else { Start-AutoCapture }
 })
 
 $itemReload.Add_Click({
+    if ($script:acStopFlag -eq 1) { return }
     Apply-Config
-    if ($script:autoCaptureTimer.Enabled) {
+    if ($script:autoCaptureRunning) {
         $script:autoCaptureTimer.Interval = [Math]::Max(500, [int]$script:Config.AutoCaptureIntervalMs)
         $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
     }
@@ -1626,7 +1901,7 @@ function Invoke-CleanExit {
         Review & Stitch (when AutoLaunchReviewOnStop is enabled) instead of
         silently abandoning them.
     #>
-    if ($script:autoCaptureTimer.Enabled) {
+    if ($script:autoCaptureRunning) {
         Stop-AutoCapture
     }
     elseif ($script:manualShotFolder -and $script:Config.AutoLaunchReviewOnStop) {
@@ -1655,6 +1930,10 @@ function Invoke-CleanExit {
     # like it silently did nothing even when it had, in fact, fired.
     Start-Sleep -Milliseconds 200
     $trayIcon.Visible = $false
+    if ($script:singleInstanceMutex) {
+        $script:singleInstanceMutex.ReleaseMutex()
+        $script:singleInstanceMutex.Dispose()
+    }
     [System.Windows.Forms.Application]::Exit()
 }
 
@@ -1698,16 +1977,17 @@ $pollTimer.Add_Tick({
     }
     $script:stopHotkeyWasDown = $stopDown
 
-    if ($script:duplicatePromptOpen) {
-        # The duplicate-frame prompt is up, waiting for a real mouse
-        # click - everything else pauses too (manual/clipboard capture,
-        # region move/resize, the toggle hotkeys) so nothing can sneak a
-        # new capture or action in while the question is on screen,
-        # regardless of what's causing it (a held auto-advance key, a
-        # queued hotkey, plain muscle memory). The "was down" debounce
-        # trackers are still kept in sync while paused, so a key held
-        # across the whole pause doesn't look like a brand-new press - and
-        # doesn't fire anything - the instant the prompt closes.
+    # THE VERY FIRST THING checked after the stop hotkey (which always
+    # works regardless): the stop flag. If it's 1, a duplicate frame is
+    # up for the user to answer and everything else pauses too
+    # (manual/clipboard capture, region move/resize, the toggle hotkeys)
+    # so nothing can sneak a new capture or action in while the question
+    # is on screen, regardless of what's causing it (a held auto-advance
+    # key, a queued hotkey, plain muscle memory). The "was down" debounce
+    # trackers are still kept in sync while paused, so a key held across
+    # the whole pause doesn't look like a brand-new press - and doesn't
+    # fire anything - the instant the prompt closes.
+    if ($script:acStopFlag -eq 1) {
         $script:toggleHotkeyWasDown            = Test-HotkeyCombo -Codes $script:Config.ToggleBorderHotkeyVKCodes
         $script:toggleAutoCaptureHotkeyWasDown = Test-HotkeyCombo -Codes $script:Config.ToggleAutoCaptureHotkeyVKCodes
         $script:clipboardHotkeyWasDown         = Test-HotkeyCombo -Codes $script:Config.ClipboardHotkeyVKCodes
@@ -1725,7 +2005,7 @@ $pollTimer.Add_Tick({
 
     $toggleAutoCaptureDown = Test-HotkeyCombo -Codes $script:Config.ToggleAutoCaptureHotkeyVKCodes
     if ($toggleAutoCaptureDown -and -not $script:toggleAutoCaptureHotkeyWasDown) {
-        if ($script:autoCaptureTimer.Enabled) { Stop-AutoCapture } else { Start-AutoCapture }
+        if ($script:autoCaptureRunning) { Stop-AutoCapture } else { Start-AutoCapture }
     }
     $script:toggleAutoCaptureHotkeyWasDown = $toggleAutoCaptureDown
 
@@ -1829,6 +2109,8 @@ if ($script:Config.AutoCaptureAutoStart) {
     Start-AutoCapture
 }
 
-$trayIcon.ShowBalloonTip(2000, 'Region Screenshot Tool', "Ready. Press $($Config.HotkeyName) to capture, $($Config.ClipboardHotkeyName) to copy to clipboard, $($Config.ToggleBorderHotkeyName) to hide/show the border, $($Config.ToggleAutoCaptureHotkeyName) to start/stop auto-capture, or $($Config.StopHotkeyName) to stop. Hold $($Config.MoveModifierName) + arrows to move the region, or $($Config.ResizeModifierName) + arrows to resize it. Right-click the tray icon for options.", [System.Windows.Forms.ToolTipIcon]::Info)
+Write-Log "Region Screenshot Tool started. PID=$PID"
+$trayIcon.Text = "Region Screenshot Tool (PID $PID)"
+$trayIcon.ShowBalloonTip(2000, "Region Screenshot Tool (PID $PID)", "Ready. Press $($Config.HotkeyName) to capture, $($Config.ClipboardHotkeyName) to copy to clipboard, $($Config.ToggleBorderHotkeyName) to hide/show the border, $($Config.ToggleAutoCaptureHotkeyName) to start/stop auto-capture, or $($Config.StopHotkeyName) to stop. Hold $($Config.MoveModifierName) + arrows to move the region, or $($Config.ResizeModifierName) + arrows to resize it. Right-click the tray icon for options.", [System.Windows.Forms.ToolTipIcon]::Info)
 
 [System.Windows.Forms.Application]::Run()

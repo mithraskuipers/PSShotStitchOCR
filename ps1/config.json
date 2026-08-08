@@ -1,4 +1,4 @@
-{
+﻿{
     "HotkeyName":  "Ctrl + Shift + S",
     "HotkeyVKCodes":  [
                           17,
@@ -12,11 +12,9 @@
                                    18,
                                    83
                                ],
-    "StopHotkeyName":  "Ctrl + Shift + Q",
+    "StopHotkeyName":  "Mouse Back",
     "StopHotkeyVKCodes":  [
-                              17,
-                              16,
-                              81
+                              5
                           ],
     "ToggleBorderHotkeyName":  "Ctrl + Shift + H",
     "ToggleBorderHotkeyVKCodes":  [
@@ -24,11 +22,9 @@
                                       16,
                                       72
                                   ],
-    "ToggleAutoCaptureHotkeyName":  "Ctrl + Shift + A",
+    "ToggleAutoCaptureHotkeyName":  "Mouse Forward",
     "ToggleAutoCaptureHotkeyVKCodes":  [
-                                           17,
-                                           16,
-                                           65
+                                           6
                                        ],
     "MoveModifierName":  "Ctrl + Alt",
     "MoveModifierVKCodes":  [
@@ -57,9 +53,10 @@
     "AutoCaptureSessionFolderScheme":  "Session_{date}_{time}",
     "AutoLaunchReviewOnStop":  true,
     "AutoCaptureDuplicateDetectionEnabled":  true,
-    "AutoCaptureDuplicateThresholdPercent":  99.0,
-    "LastRegionX":  0,
-    "LastRegionY":  0,
-    "LastRegionWidth":  0,
-    "LastRegionHeight":  0
+    "AutoCaptureDuplicateThresholdPercent":  99,
+    "AutoCaptureDuplicatePromptArmDelayMs":  700,
+    "LastRegionX":  1000,
+    "LastRegionY":  163,
+    "LastRegionWidth":  654,
+    "LastRegionHeight":  500
 }
