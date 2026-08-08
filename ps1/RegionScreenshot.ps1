@@ -1164,14 +1164,13 @@ function Send-KeyCombo {
 # ---------------------------------------------------------------------------
 $script:lastAutoCaptureBitmap = $null
 
-# Hard re-entrancy latch: while the duplicate-frame prompt is up, this is
-# $true and the Tick handler bails out immediately as its very first
-# statement - before touching the screen, disk, or the action key. This
-# doesn't rely on Timer.Stop() alone actually preventing further Tick
-# delivery (which turned out not to be safe in this host process), so it
-# guarantees no further shots/keypresses happen no matter what re-fires
-# the timer while the modal is open.
-$script:duplicatePromptActive = $false
+# Set to $true for the entire time the duplicate-frame prompt is on
+# screen (from just before it's shown until right after it closes) - the
+# poll timer checks this and skips manual/clipboard capture, region
+# move/resize, and the toggle hotkeys while it's up, so literally nothing
+# else can fire while the question is on screen. The stop hotkey is the
+# one exception and always still works.
+$script:duplicatePromptOpen = $false
 
 function Clear-LastAutoCaptureBitmap {
     # [System.Drawing.Bitmap]::FromFile keeps the source file locked for as
@@ -1233,12 +1232,30 @@ function Show-DuplicateFramePrompt {
     # whichever button had focus the instant this dialog appeared and
     # dismiss it before anyone could read it - which looked exactly like
     # "the notification flashes and capture just continues".
+    #
+    # KeyDown alone is NOT enough: a focused Button fires its Click on
+    # KeyUp of Space, and Form.KeyPreview only lets the form's own KeyUp
+    # handler swallow that if one is actually wired up - with only KeyDown
+    # hooked, the KeyUp for Space sailed straight through to whichever
+    # button had focus and clicked it. That's what was actually closing
+    # the dialog by itself: a key held (or auto-pressed) for the auto
+    # advance action got released while this dialog happened to be open,
+    # and its lone KeyUp silently activated the focused button. Swallowing
+    # KeyUp too closes that gap. Buttons are also made non-tab-stop so
+    # keyboard focus never lands on one in the first place, as a second
+    # layer of defense.
     $dlg.KeyPreview = $true
     $dlg.Add_KeyDown({
         param($s, $e)
         $e.Handled         = $true
         $e.SuppressKeyPress = $true
     })
+    $dlg.Add_KeyUp({
+        param($s, $e)
+        $e.Handled = $true
+    })
+    $btnStop.TabStop     = $false
+    $btnContinue.TabStop = $false
     $dlg.Add_Shown({
         $dlg.Activate()
     })
@@ -1299,29 +1316,25 @@ function Test-DuplicateFrameAndMaybePause {
     if (-not $isDuplicate) { return $false }
 
     Write-Log ("Auto-capture paused: shot is {0:N1}% similar to the previous one (threshold {1}%)." -f $similarity, $script:Config.AutoCaptureDuplicateThresholdPercent)
-    $script:duplicatePromptActive = $true
     $script:autoCaptureTimer.Stop()
-    $script:autoCaptureTimer.Enabled = $false
+    $script:duplicatePromptOpen = $true
     $itemAutoCapture.Text = 'Auto-Capture Paused (similar frame)'
 
-    $shouldStop = $false
     try {
         $shouldStop = Show-DuplicateFramePrompt -SimilarityPercent $similarity
+
+        if ($shouldStop) {
+            Write-Log 'Auto-capture stopped by user from duplicate-frame prompt.'
+            Stop-AutoCapture
+        }
+        else {
+            $script:autoCaptureTimer.Start()
+            $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
+            Write-Log 'Auto-capture resumed by user from duplicate-frame prompt.'
+        }
     }
     finally {
-        # Must clear the latch no matter what, or a thrown/cancelled prompt
-        # would leave auto-capture permanently stuck.
-        $script:duplicatePromptActive = $false
-    }
-
-    if ($shouldStop) {
-        Write-Log 'Auto-capture stopped by user from duplicate-frame prompt.'
-        Stop-AutoCapture
-    }
-    else {
-        $script:autoCaptureTimer.Start()
-        $itemAutoCapture.Text = "Stop Auto-Capture (every $(Format-IntervalMs $script:Config.AutoCaptureIntervalMs))"
-        Write-Log 'Auto-capture resumed by user from duplicate-frame prompt.'
+        $script:duplicatePromptOpen = $false
     }
     return $true
 }
@@ -1334,32 +1347,63 @@ function Test-DuplicateFrameAndMaybePause {
 # between the key press and the screenshot.
 # ---------------------------------------------------------------------------
 $script:autoCaptureTimer = New-Object System.Windows.Forms.Timer
+$script:autoCaptureTickBusy = $false
 $script:autoCaptureTimer.Add_Tick({
-    if ($script:duplicatePromptActive) {
-        Write-Log 'Auto-capture tick skipped: duplicate-frame prompt is active.'
-        return
-    }
-    $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
-    $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
-    if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
-        $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
-        Show-CaptureFlash -Rect $script:captureRect
-        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
-        if ($script:Config.AutoActionDelayMs -gt 0) {
-            Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
-        }
-        Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
-    }
-    else {
-        if ($hasAction) {
-            Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
-            if ($script:Config.AutoActionDelayMs -gt 0) {
-                Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+    # Reentrancy guard: Hide-CaptureFlash (called from Save-RegionScreenshot)
+    # pumps the message queue with Application.DoEvents(), and the
+    # duplicate-frame prompt pumps it too via ShowDialog() - both run while
+    # this very Tick handler is still on the call stack. A WinForms Timer's
+    # pending WM_TIMER is delivered by that same pump like any other
+    # message, so without this guard a slow tick let autoCaptureTimer fire
+    # again re-entrantly before the first tick finished. Each reentrant
+    # call saved its own shot and opened its own duplicate-frame dialog,
+    # which is what looked like the dialog flashing and immediately closing
+    # as each newer, overlapping call tore down and replaced the one before
+    # it. Stopping the timer up front (before anything that can pump
+    # messages) and re-arming only once this tick is fully done - and the
+    # busy flag as a belt-and-braces check - keeps ticks strictly
+    # sequential.
+    if ($script:autoCaptureTickBusy) { return }
+    $script:autoCaptureTickBusy = $true
+    try {
+        $script:autoCaptureTimer.Stop()
+
+        $targetFolder = if ($script:currentSessionFolder) { $script:currentSessionFolder } else { $script:Config.SaveLocation }
+        $hasAction = @($script:Config.AutoActionVKCodes).Count -gt 0
+        $pausedByDuplicateCheck = $false
+        if ($hasAction -and $script:Config.AutoActionTiming -eq 'After') {
+            $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
+            Show-CaptureFlash -Rect $script:captureRect
+            $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
+            if (-not $pausedByDuplicateCheck) {
+                if ($script:Config.AutoActionDelayMs -gt 0) {
+                    Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+                }
+                Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
             }
         }
-        $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
-        Show-CaptureFlash -Rect $script:captureRect
-        if (Test-DuplicateFrameAndMaybePause -Path $path) { return }
+        else {
+            if ($hasAction) {
+                Send-KeyCombo -Codes $script:Config.AutoActionVKCodes
+                if ($script:Config.AutoActionDelayMs -gt 0) {
+                    Start-Sleep -Milliseconds $script:Config.AutoActionDelayMs
+                }
+            }
+            $path = Save-RegionScreenshot -Rect $script:captureRect -Folder $targetFolder
+            Show-CaptureFlash -Rect $script:captureRect
+            $pausedByDuplicateCheck = Test-DuplicateFrameAndMaybePause -Path $path
+        }
+
+        # Test-DuplicateFrameAndMaybePause already left the timer in the
+        # right state (paused-and-resumed, or fully stopped via
+        # Stop-AutoCapture) when it returns $true - only re-arm here for
+        # the normal, non-paused case.
+        if (-not $pausedByDuplicateCheck) {
+            $script:autoCaptureTimer.Start()
+        }
+    }
+    finally {
+        $script:autoCaptureTickBusy = $false
     }
 })
 
@@ -1556,7 +1600,6 @@ function Stop-AutoCapture {
 }
 
 $itemAutoCapture.Add_Click({
-    if ($script:duplicatePromptActive) { return }
     if ($script:autoCaptureTimer.Enabled) { Stop-AutoCapture } else { Start-AutoCapture }
 })
 
@@ -1655,6 +1698,24 @@ $pollTimer.Add_Tick({
     }
     $script:stopHotkeyWasDown = $stopDown
 
+    if ($script:duplicatePromptOpen) {
+        # The duplicate-frame prompt is up, waiting for a real mouse
+        # click - everything else pauses too (manual/clipboard capture,
+        # region move/resize, the toggle hotkeys) so nothing can sneak a
+        # new capture or action in while the question is on screen,
+        # regardless of what's causing it (a held auto-advance key, a
+        # queued hotkey, plain muscle memory). The "was down" debounce
+        # trackers are still kept in sync while paused, so a key held
+        # across the whole pause doesn't look like a brand-new press - and
+        # doesn't fire anything - the instant the prompt closes.
+        $script:toggleHotkeyWasDown            = Test-HotkeyCombo -Codes $script:Config.ToggleBorderHotkeyVKCodes
+        $script:toggleAutoCaptureHotkeyWasDown = Test-HotkeyCombo -Codes $script:Config.ToggleAutoCaptureHotkeyVKCodes
+        $script:clipboardHotkeyWasDown         = Test-HotkeyCombo -Codes $script:Config.ClipboardHotkeyVKCodes
+        $script:hotkeyWasDown                  = Test-HotkeyCombo -Codes $script:Config.HotkeyVKCodes
+        $script:moveResizeHoldState = @{}
+        return
+    }
+
     $toggleDown = Test-HotkeyCombo -Codes $script:Config.ToggleBorderHotkeyVKCodes
     if ($toggleDown -and -not $script:toggleHotkeyWasDown) {
         $visible = Toggle-RegionBorder
@@ -1663,7 +1724,7 @@ $pollTimer.Add_Tick({
     $script:toggleHotkeyWasDown = $toggleDown
 
     $toggleAutoCaptureDown = Test-HotkeyCombo -Codes $script:Config.ToggleAutoCaptureHotkeyVKCodes
-    if ($toggleAutoCaptureDown -and -not $script:toggleAutoCaptureHotkeyWasDown -and -not $script:duplicatePromptActive) {
+    if ($toggleAutoCaptureDown -and -not $script:toggleAutoCaptureHotkeyWasDown) {
         if ($script:autoCaptureTimer.Enabled) { Stop-AutoCapture } else { Start-AutoCapture }
     }
     $script:toggleAutoCaptureHotkeyWasDown = $toggleAutoCaptureDown
@@ -1671,40 +1732,26 @@ $pollTimer.Add_Tick({
     # Clipboard combo (Ctrl+Shift+Alt+S) is a superset of the plain save
     # combo (Ctrl+Shift+S), so it's checked first - if it fires, the plain
     # save combo is suppressed for this tick so a single key press doesn't
-    # trigger both. Both are skipped while the duplicate-frame prompt is
-    # up: if AutoActionVKCodes happens to overlap with either combo (e.g.
-    # the auto-press key is also Ctrl+Shift+S), a paused auto-capture
-    # session shouldn't still be able to sneak a shot in through the
-    # manual-capture path.
+    # trigger both.
     $clipboardDown = Test-HotkeyCombo -Codes $script:Config.ClipboardHotkeyVKCodes
     if ($clipboardDown -and -not $script:clipboardHotkeyWasDown) {
-        if ($script:duplicatePromptActive) {
-            Write-Log 'Clipboard hotkey ignored: duplicate-frame prompt is active.'
-        }
-        else {
-            Copy-RegionScreenshotToClipboard -Rect $script:captureRect
-            Show-CaptureFlash -Rect $script:captureRect
-            $trayIcon.ShowBalloonTip(1200, 'Screenshot Copied', 'Region copied to clipboard.', [System.Windows.Forms.ToolTipIcon]::Info)
-        }
+        Copy-RegionScreenshotToClipboard -Rect $script:captureRect
+        Show-CaptureFlash -Rect $script:captureRect
+        $trayIcon.ShowBalloonTip(1200, 'Screenshot Copied', 'Region copied to clipboard.', [System.Windows.Forms.ToolTipIcon]::Info)
     }
     $script:clipboardHotkeyWasDown = $clipboardDown
 
     $allDown = Test-HotkeyCombo -Codes $script:Config.HotkeyVKCodes
     if ($allDown -and -not $clipboardDown -and -not $script:hotkeyWasDown) {
-        if ($script:duplicatePromptActive) {
-            Write-Log 'Manual capture hotkey ignored: duplicate-frame prompt is active.'
+        $path = Save-RegionScreenshot -Rect $script:captureRect
+        # Only tracked when there's no active auto-capture session - those
+        # already have their own folder via $script:currentSessionFolder,
+        # this is purely for the "just pressed Alt+S a few times" case.
+        if (-not $script:currentSessionFolder) {
+            $script:manualShotFolder = Split-Path -Path $path -Parent
         }
-        else {
-            $path = Save-RegionScreenshot -Rect $script:captureRect
-            # Only tracked when there's no active auto-capture session - those
-            # already have their own folder via $script:currentSessionFolder,
-            # this is purely for the "just pressed Alt+S a few times" case.
-            if (-not $script:currentSessionFolder) {
-                $script:manualShotFolder = Split-Path -Path $path -Parent
-            }
-            Show-CaptureFlash -Rect $script:captureRect
-            $trayIcon.ShowBalloonTip(1200, 'Screenshot Saved', (Split-Path $path -Leaf), [System.Windows.Forms.ToolTipIcon]::Info)
-        }
+        Show-CaptureFlash -Rect $script:captureRect
+        $trayIcon.ShowBalloonTip(1200, 'Screenshot Saved', (Split-Path $path -Leaf), [System.Windows.Forms.ToolTipIcon]::Info)
     }
     $script:hotkeyWasDown = $allDown
 
