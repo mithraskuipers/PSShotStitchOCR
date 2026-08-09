@@ -1275,50 +1275,39 @@ function Show-DuplicateFramePrompt {
         auto-capture timer is always stopped by the caller before this is
         shown, so no new capture can fire while it's up.
 
-        This version fixes the actual root cause of "the popup shows up
-        and disappears immediately, capturing just continues": closing a
-        WinForms dialog shown via ShowDialog() through anything OTHER than
-        a control that explicitly sets DialogResult - the system Close (X)
-        button, Alt+F4, "Close window" from the taskbar, etc. - leaves
-        DialogResult at its default of Cancel once the dialog finishes
-        closing. The previous version of this dialog only ever treated
-        DialogResult.Yes as "Stop", so ANY uncontrolled close silently
-        took the Continue branch and got logged as if the user had
-        clicked Continue - even though nobody had touched a button. That
-        matches exactly what the logs showed: a "resumed by user" line
-        appearing every time, on a schedule no human was actually driving.
+        ROOT CAUSE OF "click Continue and nothing happens": the previous
+        version tracked which button was clicked with its own
+        $script:_dupPromptAnswer variable, set only inside the two
+        Add_Click handlers, and tried to guarantee it was never left
+        'None' by canceling FormClosing until that variable was set. In
+        practice the dialog still closed with the answer stuck at 'None'
+        even on a genuine click - the hand-rolled tracking had a gap
+        somewhere in that Click -> variable -> Close -> FormClosing chain
+        that reproduced on every test run, not just an edge case.
 
-        Three changes close that hole and the ones next to it:
+        The fix is to stop hand-rolling this at all. WinForms already has
+        a mechanism for exactly this that doesn't have that gap:
+        Button.DialogResult. Setting it makes the framework itself close
+        the dialog with that result the moment the button is clicked, and
+        Form.ShowDialog() hands that result straight back as its return
+        value - there's no separate variable that can end up out of sync
+        with what was actually clicked.
 
-          1. ControlBox = $false removes the system Close (X) button
-             entirely, and FormClosing refuses to let the dialog close at
-             all unless $script:_dupPromptAnswer has already been set by
-             one of the two button Click handlers below. Nothing else in
-             this function - or anywhere else - ever sets that variable.
-             That makes an explicit click the only possible way out,
-             full stop.
-          2. Both buttons stay disabled for AutoCaptureDuplicatePromptArmDelayMs
-             (default 700ms) after the dialog appears, and the message
-             queue is drained with a couple of DoEvents() calls first.
-             That's the guard against a click or key-release that was
-             already in flight the instant this dialog popped up - it
-             can no longer land on a button before the user has actually
-             had a chance to see the dialog.
-          3. The dialog explicitly grabs OS input focus (SetForegroundWindow
-             + Activate) rather than relying on TopMost alone, and sits in
-             the bottom-right corner instead of dead-center - screen-center
-             is exactly where a lot of "Next" / "Continue" UI in whatever's
-             being captured tends to sit, so keeping this dialog away from
-             there means it's not competing for the same clicks.
+        ControlBox = $false removes the system Close (X) button and
+        disables Alt+F4 on a FixedDialog form, so a button click is the
+        only way to close this dialog - no FormClosing guard needed to
+        enforce that.
+
+        Both buttons stay disabled for AutoCaptureDuplicatePromptArmDelayMs
+        (default 700ms) after the dialog appears, so a click or key
+        release already in flight the instant this dialog popped up can't
+        land on either one - a disabled WinForms button simply doesn't
+        fire Click, no message-pumping needed to guard against it.
 
         Keystrokes are still swallowed entirely (KeyDown/KeyUp both
-        handled, buttons non-tab-stop) for the same reason as before: the
-        auto-press feature can hold or repeat a key, and a stray KeyUp
-        reaching a focused button could otherwise click it unattended.
-        With ControlBox off and FormClosing guarding everything else, that
-        swallowing is now genuinely just a keyboard-input guard rather
-        than the only thing standing between this dialog and an
-        accidental dismissal.
+        handled, buttons non-tab-stop): the auto-press feature can hold
+        or repeat a key, and a stray KeyUp reaching a focused button
+        could otherwise click it unattended.
     #>
     param([Parameter(Mandatory)][double]$SimilarityPercent)
 
@@ -1357,37 +1346,39 @@ function Show-DuplicateFramePrompt {
     $dlg.Controls.Add($lblArming)
 
     $btnStop = New-Object System.Windows.Forms.Button
-    $btnStop.Text     = 'Stop'
-    $btnStop.Size     = New-Object System.Drawing.Size(110, 30)
-    $btnStop.Location = New-Object System.Drawing.Point(160, 104)
-    $btnStop.Enabled  = ($armDelayMs -le 0)
-    $btnStop.TabStop  = $false
+    $btnStop.Text         = 'Stop'
+    $btnStop.Size         = New-Object System.Drawing.Size(110, 30)
+    $btnStop.Location     = New-Object System.Drawing.Point(160, 104)
+    $btnStop.Enabled      = ($armDelayMs -le 0)
+    $btnStop.TabStop      = $false
+    $btnStop.DialogResult = [System.Windows.Forms.DialogResult]::Yes
     $dlg.Controls.Add($btnStop)
 
     $btnContinue = New-Object System.Windows.Forms.Button
-    $btnContinue.Text     = 'Continue'
-    $btnContinue.Size     = New-Object System.Drawing.Size(110, 30)
-    $btnContinue.Location = New-Object System.Drawing.Point(276, 104)
-    $btnContinue.Enabled  = ($armDelayMs -le 0)
-    $btnContinue.TabStop  = $false
+    $btnContinue.Text         = 'Continue'
+    $btnContinue.Size         = New-Object System.Drawing.Size(110, 30)
+    $btnContinue.Location     = New-Object System.Drawing.Point(276, 104)
+    $btnContinue.Enabled      = ($armDelayMs -le 0)
+    $btnContinue.TabStop      = $false
+    $btnContinue.DialogResult = [System.Windows.Forms.DialogResult]::No
     $dlg.Controls.Add($btnContinue)
 
-    # The single source of truth for how this dialog closed. Script-scoped
-    # (rather than a local captured by a closure) so both button handlers,
-    # FormClosing, and the code right after ShowDialog() all see the same
-    # value. Only 'Stop' or 'Continue', set only by the two Click handlers
-    # immediately below, ever get written here.
-    $script:_dupPromptAnswer   = 'None'
-    $script:_dupPromptShownAt  = $null
+    $script:_dupPromptShownAt = $null
 
-    $btnStop.Add_Click({
-        $script:_dupPromptAnswer = 'Stop'
-        $dlg.Close()
-    }.GetNewClosure())
-    $btnContinue.Add_Click({
-        $script:_dupPromptAnswer = 'Continue'
-        $dlg.Close()
-    }.GetNewClosure())
+    # Script-scoped (not closure-captured) so the arm timer's Tick handler
+    # below - itself a scriptblock nested inside the Add_Shown scriptblock -
+    # resolves them unambiguously. Two GetNewClosure() calls nested inside
+    # each other is exactly the kind of thing that can lose a variable
+    # binding silently in PowerShell: that's what threw "The property
+    # 'Enabled' cannot be found on this object" from inside the Tick
+    # handler once clicks started reaching the buttons for real - $btnStop
+    # / $btnContinue / $lblArming were coming through as $null there.
+    # Script scope sidesteps closures entirely.
+    $script:_dupDlg          = $dlg
+    $script:_dupBtnStop      = $btnStop
+    $script:_dupBtnContinue  = $btnContinue
+    $script:_dupLblArming    = $lblArming
+    $script:_dupArmTimer     = $null
 
     $dlg.KeyPreview = $true
     $dlg.Add_KeyDown({
@@ -1400,66 +1391,62 @@ function Show-DuplicateFramePrompt {
         $e.Handled = $true
     })
 
-    # The actual fix: refuse every close that didn't come from one of the
-    # two buttons above (see the function comment for the full story).
-    $dlg.Add_FormClosing({
-        param($s, $e)
-        if ($script:_dupPromptAnswer -eq 'None') {
-            $e.Cancel = $true
-        }
-    }.GetNewClosure())
-
     $dlg.Add_Shown({
         $script:_dupPromptShownAt = Get-Date
         Write-Log "Duplicate-frame prompt shown ($simText% similar)."
 
-        [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
-        $dlg.Activate()
-        $dlg.Focus()
-
-        # Drain anything already sitting in the message queue - a stray
-        # click or key release in flight the instant this dialog appeared -
-        # before the arming timer (or immediate enable, if the delay is 0)
-        # makes the buttons clickable.
-        [System.Windows.Forms.Application]::DoEvents()
-        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
+            $dlg.Activate()
+        } catch { }
 
         if ($armDelayMs -gt 0) {
-            $armTimer = New-Object System.Windows.Forms.Timer
-            $armTimer.Interval = $armDelayMs
-            $armTimer.Add_Tick({
-                $armTimer.Stop()
-                $armTimer.Dispose()
-                if (-not $dlg.IsDisposed -and $script:_dupPromptAnswer -eq 'None') {
-                    $btnStop.Enabled     = $true
-                    $btnContinue.Enabled = $true
-                    $lblArming.Visible   = $false
-                    Write-Log 'Duplicate-frame prompt armed - now accepting clicks.'
+            $script:_dupArmTimer = New-Object System.Windows.Forms.Timer
+            $script:_dupArmTimer.Interval = $armDelayMs
+            $script:_dupArmTimer.Add_Tick({
+                try {
+                    $script:_dupArmTimer.Stop()
+                    $script:_dupArmTimer.Dispose()
+                    $script:_dupArmTimer = $null
+                    if ($script:_dupDlg -and -not $script:_dupDlg.IsDisposed) {
+                        $script:_dupBtnStop.Enabled     = $true
+                        $script:_dupBtnContinue.Enabled = $true
+                        if ($script:_dupLblArming) { $script:_dupLblArming.Visible = $false }
+                        Write-Log 'Duplicate-frame prompt armed - now accepting clicks.'
+                    }
                 }
-            }.GetNewClosure())
-            $armTimer.Start()
+                catch {
+                    # Never let this bubble up as an unhandled WinForms
+                    # exception dialog stacking on top of whatever prompt
+                    # comes next - log it and fail safe (buttons simply
+                    # stay disabled, which surfaces as "nothing happens
+                    # when I click" rather than a confusing extra popup).
+                    Write-Log "ERROR: duplicate-frame prompt arm-timer failed: $($_.Exception.Message)"
+                }
+            })
+            $script:_dupArmTimer.Start()
         }
     }.GetNewClosure())
 
-    [void]$dlg.ShowDialog()
+    $result = $dlg.ShowDialog()
 
     $elapsedMs = if ($script:_dupPromptShownAt) {
         [int]((Get-Date) - $script:_dupPromptShownAt).TotalMilliseconds
     } else { -1 }
-    $answer = $script:_dupPromptAnswer
     $dlg.Dispose()
 
-    Write-Log "Duplicate-frame prompt closed after ${elapsedMs}ms. Answer=$answer"
+    Write-Log "Duplicate-frame prompt closed after ${elapsedMs}ms. Answer=$result"
 
-    if ($answer -eq 'None') {
-        # Should be structurally unreachable now - FormClosing cancels
-        # every close attempt until one of the two buttons sets the
-        # answer - but if it somehow still happens, fail safe by treating
-        # it as Stop rather than silently letting capture continue.
-        Write-Log 'WARNING: duplicate-frame prompt closed with no recorded button click. Stopping auto-capture as a safety fallback.'
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes -and
+        $result -ne [System.Windows.Forms.DialogResult]::No) {
+        # ControlBox = $false removes the only two ways this could
+        # normally happen (system Close button, Alt+F4) - if it somehow
+        # still happens, fail safe by treating it as Stop rather than
+        # silently letting capture continue.
+        Write-Log "WARNING: duplicate-frame prompt closed with unexpected result '$result'. Stopping auto-capture as a safety fallback."
         return $true
     }
-    return ($answer -eq 'Stop')
+    return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
 function Test-DuplicateFrameAndMaybePause {
@@ -1807,100 +1794,94 @@ function Show-ReviewHandoffPrompt {
         explicitly chosen to stop there.
 
         Returns $true for "Yes, open Review & Stitch" and $false for "No,
-        stay stopped without opening it". Uses the same ControlBox/
-        FormClosing guard as Show-DuplicateFramePrompt above: the only way
-        out is one of the two buttons, so an accidental Alt+F4 or system
-        close can't silently pick either answer.
+        stay stopped without opening it". Same fix as Show-DuplicateFramePrompt
+        above: Button.DialogResult + ShowDialog()'s own return value,
+        instead of a hand-rolled $script:_reviewPromptAnswer variable that
+        could (and did) end up 'None' even after a real click. ControlBox
+        = $false is what actually keeps this a two-button-only exit; no
+        FormClosing guard is needed on top of it.
     #>
     param([Parameter(Mandatory)][int]$ShotCount)
 
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text            = 'Region Screenshot Tool - Auto-Capture Stopped'
-    $dlg.FormBorderStyle = 'FixedDialog'
-    $dlg.MaximizeBox     = $false
-    $dlg.MinimizeBox     = $false
-    $dlg.ControlBox      = $false
-    $dlg.ShowInTaskbar   = $true
-    $dlg.TopMost         = $true
-    $dlg.StartPosition   = 'Manual'
-    $dlg.ClientSize      = New-Object System.Drawing.Size(400, 150)
+    try {
+        $dlg = New-Object System.Windows.Forms.Form
+        $dlg.Text            = 'Region Screenshot Tool - Auto-Capture Stopped'
+        $dlg.FormBorderStyle = 'FixedDialog'
+        $dlg.MaximizeBox     = $false
+        $dlg.MinimizeBox     = $false
+        $dlg.ControlBox      = $false
+        $dlg.ShowInTaskbar   = $true
+        $dlg.TopMost         = $true
+        $dlg.StartPosition   = 'Manual'
+        $dlg.ClientSize      = New-Object System.Drawing.Size(400, 150)
 
-    # Same bottom-right placement as the duplicate-frame prompt, for the
-    # same reason - stays clear of whatever's on screen center.
-    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $dlg.Location = New-Object System.Drawing.Point(
-        ($wa.Right - $dlg.Width - 24), ($wa.Bottom - $dlg.Height - 24))
+        $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        $dlg.Location = New-Object System.Drawing.Point(
+            ($wa.Right - $dlg.Width - 24), ($wa.Top + 24))
 
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text     = "Auto-capture stopped ($ShotCount screenshot(s) captured, due to a duplicate frame).`n`nOpen Review & Stitch now?"
-    $lbl.Location = New-Object System.Drawing.Point(18, 16)
-    $lbl.Size     = New-Object System.Drawing.Size(364, 68)
-    $dlg.Controls.Add($lbl)
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text     = "Auto-capture stopped ($ShotCount screenshot(s) captured, due to a duplicate frame).`n`nOpen Review & Stitch now?"
+        $lbl.Location = New-Object System.Drawing.Point(18, 16)
+        $lbl.Size     = New-Object System.Drawing.Size(364, 68)
+        $dlg.Controls.Add($lbl)
 
-    $btnNo = New-Object System.Windows.Forms.Button
-    $btnNo.Text     = 'No'
-    $btnNo.Size     = New-Object System.Drawing.Size(110, 30)
-    $btnNo.Location = New-Object System.Drawing.Point(160, 104)
-    $btnNo.TabStop  = $false
-    $dlg.Controls.Add($btnNo)
+        $btnNo = New-Object System.Windows.Forms.Button
+        $btnNo.Text         = 'No'
+        $btnNo.Size         = New-Object System.Drawing.Size(110, 30)
+        $btnNo.Location     = New-Object System.Drawing.Point(160, 104)
+        $btnNo.TabStop      = $false
+        $btnNo.DialogResult = [System.Windows.Forms.DialogResult]::No
+        $dlg.Controls.Add($btnNo)
 
-    $btnYes = New-Object System.Windows.Forms.Button
-    $btnYes.Text     = 'Yes'
-    $btnYes.Size     = New-Object System.Drawing.Size(110, 30)
-    $btnYes.Location = New-Object System.Drawing.Point(276, 104)
-    $btnYes.TabStop  = $false
-    $dlg.Controls.Add($btnYes)
+        $btnYes = New-Object System.Windows.Forms.Button
+        $btnYes.Text         = 'Yes'
+        $btnYes.Size         = New-Object System.Drawing.Size(110, 30)
+        $btnYes.Location     = New-Object System.Drawing.Point(276, 104)
+        $btnYes.TabStop      = $false
+        $btnYes.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+        $dlg.Controls.Add($btnYes)
 
-    # Same single-source-of-truth pattern as $script:_dupPromptAnswer.
-    $script:_reviewPromptAnswer = 'None'
+        $dlg.Add_Shown({
+            Write-Log "Review-handoff prompt shown ($ShotCount screenshot(s))."
+            # Best-effort only - never let a focus-grab failure affect
+            # anything else, this dialog is fully usable without it.
+            try {
+                [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
+                $dlg.Activate()
+            }
+            catch { }
+        }.GetNewClosure())
 
-    $btnNo.Add_Click({
-        $script:_reviewPromptAnswer = 'No'
-        $dlg.Close()
-    }.GetNewClosure())
-    $btnYes.Add_Click({
-        $script:_reviewPromptAnswer = 'Yes'
-        $dlg.Close()
-    }.GetNewClosure())
+        $result = $dlg.ShowDialog()
+        $dlg.Dispose()
 
-    $dlg.KeyPreview = $true
-    $dlg.Add_KeyDown({
-        param($s, $e)
-        $e.Handled          = $true
-        $e.SuppressKeyPress = $true
-    })
-    $dlg.Add_KeyUp({
-        param($s, $e)
-        $e.Handled = $true
-    })
+        Write-Log "Review-handoff prompt closed. Answer=$result"
 
-    $dlg.Add_FormClosing({
-        param($s, $e)
-        if ($script:_reviewPromptAnswer -eq 'None') {
-            $e.Cancel = $true
+        if ($result -ne [System.Windows.Forms.DialogResult]::Yes -and
+            $result -ne [System.Windows.Forms.DialogResult]::No) {
+            # ControlBox = $false removes the only two normal ways this
+            # could happen - fail safe by treating it as No rather than
+            # silently opening Review & Stitch.
+            Write-Log "WARNING: review-handoff prompt closed with unexpected result '$result'. Not opening Review & Stitch as a safety fallback."
+            return $false
         }
-    }.GetNewClosure())
-
-    $dlg.Add_Shown({
-        Write-Log "Review-handoff prompt shown ($ShotCount screenshot(s))."
-        [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
-        $dlg.Activate()
-        $dlg.Focus()
-    }.GetNewClosure())
-
-    [void]$dlg.ShowDialog()
-    $answer = $script:_reviewPromptAnswer
-    $dlg.Dispose()
-
-    Write-Log "Review-handoff prompt closed. Answer=$answer"
-
-    if ($answer -eq 'None') {
-        # Structurally unreachable (see FormClosing above), but fail safe
-        # by treating it as No rather than silently opening Review & Stitch.
-        Write-Log 'WARNING: review-handoff prompt closed with no recorded button click. Not opening Review & Stitch as a safety fallback.'
+        return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+    }
+    catch {
+        # This whole function used to run under the script's top-level
+        # trap { continue } with no visible symptom beyond a FATAL log
+        # line - from the user's side that reads exactly as "clicked
+        # Yes, and nothing happened at all". Catching here instead means
+        # any dialog-construction/handling failure is loud (a balloon
+        # tip) and fails safe (treated as No, so a broken dialog can
+        # never silently pretend the user said yes).
+        Write-Log "ERROR: review-handoff prompt failed: $($_.Exception.Message)"
+        Write-Log $_.ScriptStackTrace
+        $trayIcon.ShowBalloonTip(3000, 'Region Screenshot Tool',
+            "Review-handoff prompt failed: $($_.Exception.Message)",
+            [System.Windows.Forms.ToolTipIcon]::Warning)
         return $false
     }
-    return ($answer -eq 'Yes')
 }
 
 function Format-IntervalMs {
@@ -1966,20 +1947,35 @@ function Stop-AutoCapture {
             Where-Object { @('.png', '.bmp') -contains $_.Extension.ToLowerInvariant() }).Count
         $willReview = $shotCount -gt 0 -and $script:Config.AutoLaunchReviewOnStop
 
-        if ($willReview -and $ConfirmReviewHandoff) {
-            $confirmed = Show-ReviewHandoffPrompt -ShotCount $shotCount
-            if (-not $confirmed) {
-                Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=false (user declined review-handoff prompt)"
-                $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', "$shotCount screenshot(s) captured.", [System.Windows.Forms.ToolTipIcon]::Info)
-                return
+        try {
+            if ($willReview -and $ConfirmReviewHandoff) {
+                $confirmed = Show-ReviewHandoffPrompt -ShotCount $shotCount
+                if (-not $confirmed) {
+                    Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=false (user declined review-handoff prompt)"
+                    $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', "$shotCount screenshot(s) captured.", [System.Windows.Forms.ToolTipIcon]::Info)
+                    return
+                }
+            }
+
+            $statusMsg = if ($willReview) { "$shotCount screenshot(s) captured. Opening review..." } else { "$shotCount screenshot(s) captured." }
+            $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', $statusMsg, [System.Windows.Forms.ToolTipIcon]::Info)
+            Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=$willReview"
+            if ($willReview) {
+                Start-ReviewTool -SourceFolder $finishedSession
             }
         }
-
-        $statusMsg = if ($willReview) { "$shotCount screenshot(s) captured. Opening review..." } else { "$shotCount screenshot(s) captured." }
-        $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', $statusMsg, [System.Windows.Forms.ToolTipIcon]::Info)
-        Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=$willReview"
-        if ($willReview) {
-            Start-ReviewTool -SourceFolder $finishedSession
+        catch {
+            # Same reasoning as the try/catch inside Show-ReviewHandoffPrompt:
+            # without this, any failure here (confirming the prompt or
+            # launching Start-ReviewTool) would be caught by the script's
+            # top-level trap { continue } and only ever show up as a FATAL
+            # line in the log - from the user's side, clicking Yes and
+            # simply nothing happening, with no visible error at all.
+            Write-Log "ERROR: review handoff failed after stopping auto-capture: $($_.Exception.Message)"
+            Write-Log $_.ScriptStackTrace
+            $trayIcon.ShowBalloonTip(3000, 'Region Screenshot Tool',
+                "Couldn't open Review & Stitch: $($_.Exception.Message)",
+                [System.Windows.Forms.ToolTipIcon]::Warning)
         }
     }
     else {

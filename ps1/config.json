@@ -22,9 +22,12 @@
                                       16,
                                       72
                                   ],
-    "ToggleAutoCaptureHotkeyName":  "Mouse Forward",
+    "ToggleAutoCaptureHotkeyName":  "Ctrl + Shift + Alt + P",
     "ToggleAutoCaptureHotkeyVKCodes":  [
-                                           6
+                                           17,
+                                           16,
+                                           18,
+                                           80
                                        ],
     "MoveModifierName":  "Ctrl + Alt",
     "MoveModifierVKCodes":  [
@@ -54,7 +57,6 @@
     "AutoLaunchReviewOnStop":  true,
     "AutoCaptureDuplicateDetectionEnabled":  true,
     "AutoCaptureDuplicateThresholdPercent":  99,
-    "AutoCaptureDuplicatePromptArmDelayMs":  700,
     "LastRegionX":  1000,
     "LastRegionY":  163,
     "LastRegionWidth":  654,
