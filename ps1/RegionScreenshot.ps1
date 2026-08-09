@@ -1549,7 +1549,7 @@ function Test-DuplicateFrameAndMaybePause {
 
         if ($shouldStop) {
             Write-Log 'Auto-capture stopped by user from duplicate-frame prompt.'
-            Stop-AutoCapture
+            Stop-AutoCapture -ConfirmReviewHandoff
         }
         else {
             # Do NOT start autoCaptureTimer here. The outer tick handler
@@ -1797,6 +1797,112 @@ function Start-ReviewTool {
     }
 }
 
+function Show-ReviewHandoffPrompt {
+    <#
+        Modal Yes/No dialog shown after auto-capture is stopped because of
+        a duplicate-frame detection, asking whether to actually go ahead
+        and open Review & Stitch. Only used for that path - a manual Stop
+        (tray menu, stop hotkey, Exit) still hands off straight to
+        Review & Stitch exactly as before, since the user has already
+        explicitly chosen to stop there.
+
+        Returns $true for "Yes, open Review & Stitch" and $false for "No,
+        stay stopped without opening it". Uses the same ControlBox/
+        FormClosing guard as Show-DuplicateFramePrompt above: the only way
+        out is one of the two buttons, so an accidental Alt+F4 or system
+        close can't silently pick either answer.
+    #>
+    param([Parameter(Mandatory)][int]$ShotCount)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text            = 'Region Screenshot Tool - Auto-Capture Stopped'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox     = $false
+    $dlg.MinimizeBox     = $false
+    $dlg.ControlBox      = $false
+    $dlg.ShowInTaskbar   = $true
+    $dlg.TopMost         = $true
+    $dlg.StartPosition   = 'Manual'
+    $dlg.ClientSize      = New-Object System.Drawing.Size(400, 150)
+
+    # Same bottom-right placement as the duplicate-frame prompt, for the
+    # same reason - stays clear of whatever's on screen center.
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $dlg.Location = New-Object System.Drawing.Point(
+        ($wa.Right - $dlg.Width - 24), ($wa.Bottom - $dlg.Height - 24))
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text     = "Auto-capture stopped ($ShotCount screenshot(s) captured, due to a duplicate frame).`n`nOpen Review & Stitch now?"
+    $lbl.Location = New-Object System.Drawing.Point(18, 16)
+    $lbl.Size     = New-Object System.Drawing.Size(364, 68)
+    $dlg.Controls.Add($lbl)
+
+    $btnNo = New-Object System.Windows.Forms.Button
+    $btnNo.Text     = 'No'
+    $btnNo.Size     = New-Object System.Drawing.Size(110, 30)
+    $btnNo.Location = New-Object System.Drawing.Point(160, 104)
+    $btnNo.TabStop  = $false
+    $dlg.Controls.Add($btnNo)
+
+    $btnYes = New-Object System.Windows.Forms.Button
+    $btnYes.Text     = 'Yes'
+    $btnYes.Size     = New-Object System.Drawing.Size(110, 30)
+    $btnYes.Location = New-Object System.Drawing.Point(276, 104)
+    $btnYes.TabStop  = $false
+    $dlg.Controls.Add($btnYes)
+
+    # Same single-source-of-truth pattern as $script:_dupPromptAnswer.
+    $script:_reviewPromptAnswer = 'None'
+
+    $btnNo.Add_Click({
+        $script:_reviewPromptAnswer = 'No'
+        $dlg.Close()
+    }.GetNewClosure())
+    $btnYes.Add_Click({
+        $script:_reviewPromptAnswer = 'Yes'
+        $dlg.Close()
+    }.GetNewClosure())
+
+    $dlg.KeyPreview = $true
+    $dlg.Add_KeyDown({
+        param($s, $e)
+        $e.Handled          = $true
+        $e.SuppressKeyPress = $true
+    })
+    $dlg.Add_KeyUp({
+        param($s, $e)
+        $e.Handled = $true
+    })
+
+    $dlg.Add_FormClosing({
+        param($s, $e)
+        if ($script:_reviewPromptAnswer -eq 'None') {
+            $e.Cancel = $true
+        }
+    }.GetNewClosure())
+
+    $dlg.Add_Shown({
+        Write-Log "Review-handoff prompt shown ($ShotCount screenshot(s))."
+        [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
+        $dlg.Activate()
+        $dlg.Focus()
+    }.GetNewClosure())
+
+    [void]$dlg.ShowDialog()
+    $answer = $script:_reviewPromptAnswer
+    $dlg.Dispose()
+
+    Write-Log "Review-handoff prompt closed. Answer=$answer"
+
+    if ($answer -eq 'None') {
+        # Structurally unreachable (see FormClosing above), but fail safe
+        # by treating it as No rather than silently opening Review & Stitch.
+        Write-Log 'WARNING: review-handoff prompt closed with no recorded button click. Not opening Review & Stitch as a safety fallback.'
+        return $false
+    }
+    return ($answer -eq 'Yes')
+}
+
 function Format-IntervalMs {
     param([int]$Milliseconds)
     if ($Milliseconds % 1000 -eq 0) { return "$($Milliseconds / 1000)s" }
@@ -1825,6 +1931,20 @@ function Start-AutoCapture {
 }
 
 function Stop-AutoCapture {
+    <#
+        -ConfirmReviewHandoff: only passed by Test-DuplicateFrameAndMaybePause
+        (see below). When set, and this stop would otherwise auto-launch
+        Review & Stitch, Show-ReviewHandoffPrompt asks first - a duplicate
+        frame stopping the session is not the same as the user deliberately
+        choosing to stop (tray menu, stop hotkey, Exit), so the drastic
+        jump straight into Review & Stitch shouldn't happen without a
+        second explicit "yes" from the user. Answering No leaves auto-
+        capture stopped (already done above) but skips the handoff -
+        Review & Stitch can still be opened later from the tray's
+        "Review Last Session" item.
+    #>
+    param([switch]$ConfirmReviewHandoff)
+
     $script:autoCaptureRunning = $false
     $script:autoCaptureTimer.Stop()
     $itemAutoCapture.Text = 'Start Auto-Capture'
@@ -1845,6 +1965,16 @@ function Stop-AutoCapture {
         $shotCount = @(Get-ChildItem -LiteralPath $finishedSession -File -ErrorAction SilentlyContinue |
             Where-Object { @('.png', '.bmp') -contains $_.Extension.ToLowerInvariant() }).Count
         $willReview = $shotCount -gt 0 -and $script:Config.AutoLaunchReviewOnStop
+
+        if ($willReview -and $ConfirmReviewHandoff) {
+            $confirmed = Show-ReviewHandoffPrompt -ShotCount $shotCount
+            if (-not $confirmed) {
+                Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=false (user declined review-handoff prompt)"
+                $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', "$shotCount screenshot(s) captured.", [System.Windows.Forms.ToolTipIcon]::Info)
+                return
+            }
+        }
+
         $statusMsg = if ($willReview) { "$shotCount screenshot(s) captured. Opening review..." } else { "$shotCount screenshot(s) captured." }
         $trayIcon.ShowBalloonTip(1200, 'Auto-Capture Stopped', $statusMsg, [System.Windows.Forms.ToolTipIcon]::Info)
         Write-Log "Auto-capture stopped. Session=$finishedSession  ShotCount=$shotCount  WillReview=$willReview"
