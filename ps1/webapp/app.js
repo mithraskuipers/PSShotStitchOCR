@@ -305,20 +305,52 @@
       stitchStatus.textContent = `Done — ${sheets.length} sheet(s) ready below.`;
       const baseName = (outNameInput.value || 'stitched').trim() || 'stitched';
 
-      for (let i = 0; i < sheets.length; i++) {
-        const sheet = sheets[i];
+      // Build canvases + filenames first so every download action can be
+      // stacked in one list up top, before the (potentially long) image
+      // previews — no more scrolling past every sheet to find its button.
+      const built = sheets.map((sheet, i) => {
         const canvas = document.createElement('canvas');
         canvas.width = sheet.width; canvas.height = sheet.height;
         canvas.getContext('2d').putImageData(Engine.toImageData(sheet), 0, 0);
         const filename = sheets.length > 1 ? `${baseName}_${i + 1}.png` : `${baseName}.png`;
+        return { sheet, canvas, filename };
+      });
 
-        const card = document.createElement('div'); card.className = 'sheetCard';
-        const img = document.createElement('img'); img.src = canvas.toDataURL('image/png');
-        const meta = document.createElement('div'); meta.className = 'sheetMeta';
-        meta.textContent = `${filename} — ${sheet.width}×${sheet.height}px`;
+      const downloadsBar = document.createElement('div'); downloadsBar.className = 'downloadsBar';
+
+      if (built.length > 1) {
+        const allBtn = document.createElement('button');
+        allBtn.className = 'downloadAllBtn';
+        allBtn.textContent = `Download all (${built.length})`;
+        allBtn.addEventListener('click', async () => {
+          for (const item of built) {
+            downloadBlob(item.filename, await canvasToBlob(item.canvas));
+            // Small stagger — firing many downloadBlob() calls back-to-back
+            // can get silently dropped by the browser's multi-download guard.
+            await new Promise(r => setTimeout(r, 300));
+          }
+        });
+        downloadsBar.appendChild(allBtn);
+      }
+
+      for (const item of built) {
+        const row = document.createElement('div'); row.className = 'downloadRow';
+        const name = document.createElement('span'); name.className = 'downloadRowName';
+        name.textContent = `${item.filename} — ${item.sheet.width}×${item.sheet.height}px`;
         const btn = document.createElement('button'); btn.textContent = 'Download';
-        btn.addEventListener('click', async () => downloadBlob(filename, await canvasToBlob(canvas)));
-        card.append(img, meta, btn);
+        btn.addEventListener('click', async () => downloadBlob(item.filename, await canvasToBlob(item.canvas)));
+        row.append(name, btn);
+        downloadsBar.appendChild(row);
+      }
+
+      resultsBlock.appendChild(downloadsBar);
+
+      for (const item of built) {
+        const card = document.createElement('div'); card.className = 'sheetCard';
+        const img = document.createElement('img'); img.src = item.canvas.toDataURL('image/png');
+        const meta = document.createElement('div'); meta.className = 'sheetMeta';
+        meta.textContent = `${item.filename} — ${item.sheet.width}×${item.sheet.height}px`;
+        card.append(img, meta);
         resultsBlock.appendChild(card);
       }
     } catch (err) {
