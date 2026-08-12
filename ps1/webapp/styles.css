@@ -169,7 +169,7 @@ main{ flex:1; min-height:0; display:flex; }
 }
 .downloadAllBtn:hover{ filter:brightness(1.08); }
 .downloadRow{
-  display:flex; align-items:center; gap:8px;
+  display:flex; align-items:center; flex-wrap:wrap; gap:8px; row-gap:6px;
   background:var(--panel-3); border:1px solid var(--line); border-radius:6px; padding:6px 8px;
 }
 .downloadRowName{
@@ -181,6 +181,17 @@ main{ flex:1; min-height:0; display:flex; }
   font-family:var(--sans); font-weight:600; font-size:11.5px; padding:6px 10px; border-radius:5px; cursor:pointer;
 }
 .downloadRow button:hover{ filter:brightness(1.08); }
+.ocrBtn{
+  flex-shrink:0; background:transparent !important; color:var(--accent) !important;
+  border:1px solid var(--accent-dim) !important;
+  font-family:var(--sans); font-weight:600; font-size:11.5px; padding:6px 10px; border-radius:5px; cursor:pointer;
+}
+.ocrBtn:hover{ background:rgba(47,168,158,0.12) !important; filter:none !important; }
+.ocrBtn:disabled{ opacity:.5; cursor:not-allowed; }
+.ocrStatus{
+  flex-basis:100%; font-family:var(--mono); font-size:10.5px; color:var(--text-dim);
+}
+.ocrStatus.error{ color:var(--danger); }
 
 .sheetCard{
   background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:10px;

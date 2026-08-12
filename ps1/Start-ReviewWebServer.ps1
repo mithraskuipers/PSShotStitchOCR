@@ -34,17 +34,54 @@ param(
     # comment in RegionScreenshot.ps1's Start-ReviewTool), and
     # $MyInvocation.MyCommand.Path is empty in that case, so it's passed
     # in explicitly instead.
-    [string]$ScriptRoot
+    [string]$ScriptRoot,
+
+    # ---- CodeOCR hand-off ------------------------------------------------
+    # Where the CodeOCR tool (serve.ps1 + its src\ folder) lives, so a
+    # stitched sheet can be POSTed here and forwarded on. All three can
+    # also be set via environment variables instead of passed on the
+    # command line - same pattern as $env:REGION_SCREENSHOT_ROOT elsewhere
+    # in this project - so a single machine-level setup doesn't need every
+    # launcher/shortcut edited individually.
+    [string]$OcrServeScript  = $env:CODEOCR_SERVE_SCRIPT,   # full path to serve.ps1
+    [string]$OcrWebRoot      = $env:CODEOCR_WEBROOT,        # folder serve.ps1 should serve (contains index.html/app.js)
+    [string]$OcrProjectRoot  = $env:CODEOCR_PROJECT_ROOT    # folder serve.ps1 writes .serve.lock into (its -ProjectRoot)
 )
 
 if (-not $ScriptRoot) { $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
+# $ScriptRoot may arrive as a literal, non-normalized path (e.g.
+# "...\bat\..\ps1" from a launcher .bat) rather than a clean absolute one.
+# Split-Path is pure string parsing - it does NOT collapse ".." segments
+# the way the filesystem does - so every Split-Path call below would walk
+# up the wrong tree unless this is resolved to a real path first.
+if (Test-Path -LiteralPath $ScriptRoot) {
+    $ScriptRoot = (Resolve-Path -LiteralPath $ScriptRoot).ProviderPath
+}
+
+$ProjectRoot = Split-Path -Path $ScriptRoot -Parent
+if (-not $ProjectRoot) { $ProjectRoot = $ScriptRoot }
+
 if (-not $LogPath) {
-    $DefaultLogProjectRoot = Split-Path -Path $ScriptRoot -Parent
-    if (-not $DefaultLogProjectRoot) { $DefaultLogProjectRoot = $ScriptRoot }
-    $DefaultLogDir = Join-Path -Path $DefaultLogProjectRoot -ChildPath 'Logs'
+    $DefaultLogDir = Join-Path -Path $ProjectRoot -ChildPath 'Logs'
     New-Item -ItemType Directory -Path $DefaultLogDir -Force -ErrorAction SilentlyContinue | Out-Null
     $LogPath = Join-Path -Path $DefaultLogDir -ChildPath ("ReviewWebServer_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+}
+
+# If the caller didn't point us at a CodeOCR install via param or env var,
+# look for it where this single-folder project ships it: CodeOCR's own
+# tools\serve.ps1 and src\ sit directly under this same project root,
+# as siblings of ps1\ (..\tools\serve.ps1 / ..\src).
+# Only used as a fallback - an explicit param or env var always wins.
+if (-not $OcrProjectRoot) {
+    $guessRoot = $ProjectRoot
+    $guessServe = Join-Path $guessRoot 'tools\serve.ps1'
+    $guessWebRoot = Join-Path $guessRoot 'src'
+    if ((Test-Path -LiteralPath $guessServe) -and (Test-Path -LiteralPath $guessWebRoot)) {
+        $OcrProjectRoot = $guessRoot
+        if (-not $OcrServeScript) { $OcrServeScript = $guessServe }
+        if (-not $OcrWebRoot) { $OcrWebRoot = $guessWebRoot }
+    }
 }
 
 function Write-Log {
@@ -219,6 +256,67 @@ if (-not (Open-DefaultBrowser -Url $url)) {
     Write-Host "  $url" -ForegroundColor Yellow
 }
 
+# ------------------------------------------------------------- OCR hand-off
+
+# True if the OCR tool's .serve.lock points at a process that's still
+# alive AND still actually answering on that port - a stale lock file
+# (left behind by a crash, or from before a reboot) must never be trusted
+# on its own, or we'd hand the browser a dead URL.
+function Test-OcrServerAlive([string]$lockFile, [ref]$portOut) {
+    if (-not (Test-Path -LiteralPath $lockFile)) { return $false }
+    try {
+        $raw = (Get-Content -LiteralPath $lockFile -Raw).Trim()
+        $parts = $raw -split ':'
+        if ($parts.Count -ne 2) { return $false }
+        $procId = [int]$parts[0]
+        $port = [int]$parts[1]
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if (-not $proc) { return $false }
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $iar = $client.BeginConnect('localhost', $port, $null, $null)
+            $ok = $iar.AsyncWaitHandle.WaitOne(400)
+            if (-not $ok -or -not $client.Connected) { return $false }
+        } finally { $client.Close() }
+        $portOut.Value = $port
+        return $true
+    }
+    catch { return $false }
+}
+
+# Launches serve.ps1 for the OCR tool (unless an instance is already up)
+# and waits for its .serve.lock to appear so we know the real port it
+# landed on - it may not be the one we asked for, see serve.ps1's own
+# port-hunting logic.
+function Start-OcrServerIfNeeded {
+    param([string]$ServeScript, [string]$WebRoot, [string]$ProjectRoot)
+
+    if (-not $ServeScript -or -not $WebRoot -or -not $ProjectRoot) {
+        throw "The CodeOCR tool isn't configured. Pass -OcrServeScript / -OcrWebRoot / -OcrProjectRoot to this script (or set CODEOCR_SERVE_SCRIPT / CODEOCR_WEBROOT / CODEOCR_PROJECT_ROOT)."
+    }
+    if (-not (Test-Path -LiteralPath $ServeScript)) {
+        throw "CodeOCR's serve.ps1 wasn't found at: $ServeScript"
+    }
+
+    $lockFile = Join-Path $ProjectRoot '.serve.lock'
+    $port = 0
+    if (Test-OcrServerAlive -lockFile $lockFile -portOut ([ref]$port)) {
+        return $port
+    }
+
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$ServeScript`"",
+        '-WebRoot', "`"$WebRoot`"", '-ProjectRoot', "`"$ProjectRoot`""
+    ) | Out-Null
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-OcrServerAlive -lockFile $lockFile -portOut ([ref]$port)) { return $port }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "CodeOCR's server didn't come up within 15 seconds."
+}
+
 $running = $true
 while ($running -and $listener.IsListening) {
     $context = $listener.GetContext()
@@ -239,6 +337,51 @@ while ($running -and $listener.IsListening) {
             $response.ContentType = 'application/json; charset=utf-8'
             $response.ContentLength64 = $bytes.Length
             $response.OutputStream.Write($bytes, 0, $bytes.Length)
+        }
+        elseif ($path -eq '/api/send-to-ocr' -and $request.HttpMethod -eq 'POST') {
+            try {
+                $ms = New-Object System.IO.MemoryStream
+                $request.InputStream.CopyTo($ms)
+                $imageBytes = $ms.ToArray()
+                $ms.Dispose()
+                if ($imageBytes.Length -eq 0) { throw 'Empty upload.' }
+
+                $port = Start-OcrServerIfNeeded -ServeScript $OcrServeScript -WebRoot $OcrWebRoot -ProjectRoot $OcrProjectRoot
+
+                # Single-slot hand-off: written to the OCR tool's own project
+                # root (not its served WebRoot), so it's never reachable as
+                # a static file. serve.ps1's /api/pending-image reads and
+                # then deletes this - one image in flight at a time.
+                $handoffDir = Join-Path $OcrProjectRoot 'handoff'
+                New-Item -ItemType Directory -Path $handoffDir -Force -ErrorAction SilentlyContinue | Out-Null
+                $handoffFile = Join-Path $handoffDir 'pending.png'
+                [System.IO.File]::WriteAllBytes($handoffFile, $imageBytes)
+
+                $requestedName = $request.QueryString['name']
+                if ($requestedName) {
+                    $nameFile = Join-Path $handoffDir 'pending.name.txt'
+                    Set-Content -LiteralPath $nameFile -Value $requestedName -Encoding UTF8 -NoNewline
+                }
+
+                $ocrUrl = "http://localhost:$port/?handoff=1"
+                Write-Log "Sent stitched sheet to CodeOCR: $ocrUrl ($($imageBytes.Length) bytes)"
+
+                $json = ([PSCustomObject]@{ ok = $true; url = $ocrUrl } | ConvertTo-Json)
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+                $response.ContentType = 'application/json; charset=utf-8'
+                $response.StatusCode = 200
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            }
+            catch {
+                Write-Log "ERROR: send-to-ocr failed: $($_.Exception.Message)"
+                $json = ([PSCustomObject]@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json)
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+                $response.ContentType = 'application/json; charset=utf-8'
+                $response.StatusCode = 500
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            }
         }
         elseif ($path -eq '/api/shutdown' -and $request.HttpMethod -eq 'POST') {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"ok":true}')

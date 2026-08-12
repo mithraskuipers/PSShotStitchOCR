@@ -57,8 +57,8 @@
     "AutoLaunchReviewOnStop":  true,
     "AutoCaptureDuplicateDetectionEnabled":  true,
     "AutoCaptureDuplicateThresholdPercent":  99,
-    "LastRegionX":  1000,
-    "LastRegionY":  163,
-    "LastRegionWidth":  654,
-    "LastRegionHeight":  500
+    "LastRegionX":  859,
+    "LastRegionY":  561,
+    "LastRegionWidth":  1413,
+    "LastRegionHeight":  891
 }

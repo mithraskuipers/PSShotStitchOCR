@@ -13,6 +13,6 @@
     "DuplicateFrameMaxAvgError":  0.5,
     "AmbiguityMinRatio":  2,
     "OverlapSharpnessRatio":  0.4,
-    "LastSourceFolder":  "C:\\Users\\mkuipers\\repos\\PSShotStitchOCR\\screenshots\\Session_20260805_173928",
-    "LastOutputFolder":  "C:\\Users\\mkuipers\\repos\\PSShotStitchOCR\\stitched\\Session_20260805_173928"
+    "LastSourceFolder":  "",
+    "LastOutputFolder":  ""
 }

@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeOCR — image-to-code</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Lora:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- ===== Offline-vendored Tesseract.js assets =====
+     tesseract-assets.js bundles the Tesseract.js library plus the worker
+     script, OCR engine core (wasm), and English LSTM traineddata that
+     Tesseract.js would otherwise fetch from jsdelivr at runtime. Loading
+     them from this local file (instead of inlining them here) keeps this
+     document readable while still requiring zero network access to run. -->
+<script src="tesseract-assets.js"></script>
+
+<style>
+  :root{
+    --canvas: #ffffff;
+    --canvas-soft: #f5f5f5;
+    --hairline: #e0e0e0;
+    --ink: #000000;
+    --ink-soft: #1a1a1a;
+    --body: #757575;
+    --link: #057dbc;
+    /* legacy aliases kept so the rest of the file (ruler, etc.) still resolves */
+    --paper: var(--canvas);
+    --paper-dark: var(--canvas-soft);
+    --ribbon: var(--ink);
+    --ribbon-dark: var(--ink);
+    --pin: var(--ink);
+    --card: var(--canvas);
+    --rule: var(--hairline);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--canvas);
+    color:var(--ink);
+    font-family:'Inter', sans-serif;
+  }
+  header{
+    padding: 16px 32px;
+    border-bottom: 1px solid var(--ink);
+  }
+  header .eyebrow{
+    font-family:'Inter', sans-serif;
+    font-weight:700;
+    font-size:12px;
+    letter-spacing:1.4px;
+    text-transform:uppercase;
+    color:var(--ink);
+  }
+  header h1{
+    font-family:'Playfair Display', serif;
+    font-weight:400;
+    font-size: 40px;
+    letter-spacing:-0.4px;
+    margin: 6px 0 10px;
+  }
+  header h1 .tag{
+    display:inline-block;
+    background:var(--canvas);
+    color:var(--ink);
+    font-size:12px;
+    font-weight:700;
+    font-family:'Inter', sans-serif;
+    padding:3px 8px;
+    border:1px solid var(--ink);
+    border-radius:0;
+    vertical-align:middle;
+    margin-left:10px;
+    letter-spacing:1px;
+    text-transform:none;
+  }
+  header p{
+    margin:0;
+    color:var(--body);
+    font-family:'Lora', serif;
+    font-size:16px;
+    line-height:1.45;
+    max-width:640px;
+  }
+  main{
+    display:grid;
+    grid-template-columns: 360px 1fr;
+    gap: 24px;
+    padding: 24px 32px 48px;
+    align-items:start;
+  }
+  @media (max-width: 880px){
+    main{ grid-template-columns: 1fr; }
+  }
+  .panel{
+    background:var(--canvas);
+    border:1px solid var(--hairline);
+    border-radius:0;
+    padding:18px;
+  }
+  .panel h2{
+    font-family:'Inter', sans-serif;
+    font-size:13px;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:1px;
+    color:var(--ink);
+    margin:0 0 12px;
+    border-bottom:1px solid var(--hairline);
+    padding-bottom:8px;
+  }
+  .dropzone{
+    border:1px solid var(--ink);
+    border-radius:0;
+    padding:22px 14px;
+    text-align:center;
+    font-size:13px;
+    font-family:'Inter', sans-serif;
+    color:var(--body);
+    cursor:pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone.drag{
+    border-color:var(--ink);
+    background: var(--canvas-soft);
+    color:var(--ink);
+  }
+  .dropzone input{ display:none; }
+  .preview-wrap{
+    margin-top:14px;
+    max-height:220px;
+    overflow:auto;
+    border:1px solid var(--hairline);
+    background:var(--canvas-soft);
+  }
+  .preview-wrap canvas{ display:block; width:100%; }
+  .field{ margin-top:16px; }
+  .field label{
+    display:flex;
+    justify-content:space-between;
+    font-size:12px;
+    font-family:'Inter', sans-serif;
+    font-weight:700;
+    letter-spacing:0.4px;
+    color:var(--body);
+    margin-bottom:4px;
+  }
+  .field input[type=range]{ width:100%; accent-color:var(--ink); }
+  .toggle-row{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:13px;
+    font-family:'Inter', sans-serif;
+    margin-top:12px;
+  }
+  .toggle-row input{ accent-color:var(--ink); }
+  .job-list{
+    border:1px solid var(--ink);
+    max-height:220px;
+    overflow-y:auto;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:12px;
+  }
+  .job-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:8px;
+    padding:6px 8px;
+    border-bottom:1px solid var(--canvas-soft);
+    cursor:pointer;
+  }
+  .job-row:last-child{ border-bottom:none; }
+  .job-row:hover{ background:var(--canvas-soft); }
+  .job-row.selected{ background:var(--canvas-soft); font-weight:bold; }
+  .job-row.dragging{ opacity:0.4; }
+  .job-row.drag-over{ box-shadow: inset 0 2px 0 var(--ink); }
+  .job-drag-handle{
+    flex-shrink:0;
+    cursor:grab;
+    color:var(--body);
+    letter-spacing:-1px;
+    user-select:none;
+    touch-action:none;
+  }
+  .job-drag-handle:active{ cursor:grabbing; }
+  .job-name{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .job-status{ flex-shrink:0; color:var(--body); font-size:11px; }
+  .job-status.running{ color:var(--ink); font-weight:bold; }
+  .job-status.error{ color:#b00020; }
+  .job-toolbar{
+    display:flex;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:6px;
+    margin-bottom:6px;
+    font-family:'Inter', sans-serif;
+  }
+  .job-toolbar span{
+    font-size:11px;
+    color:var(--body);
+    margin-right:2px;
+  }
+  .job-toolbar button{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    padding:3px 7px;
+    border:1px solid var(--ink);
+    background:var(--canvas);
+    color:var(--ink);
+    cursor:pointer;
+  }
+  .job-toolbar button:hover{ background:var(--canvas-soft); }
+  .job-toolbar button.active{ background:var(--ink); color:var(--canvas); }
+  button.run{
+    width:100%;
+    margin-top:18px;
+    background:var(--ink);
+    color:var(--canvas);
+    border:none;
+    padding:12px 20px;
+    font-family:'Inter', sans-serif;
+    font-size:16px;
+    font-weight:700;
+    letter-spacing:0.3px;
+    text-transform:none;
+    border-radius:0;
+    cursor:pointer;
+  }
+  button.run:disabled{ background:var(--body); cursor:not-allowed; }
+  button.run:hover:not(:disabled){ background:var(--ink-soft); }
+  .progress{
+    margin-top:12px;
+    height:6px;
+    background:var(--canvas-soft);
+    border-radius:0;
+    overflow:hidden;
+    display:none;
+  }
+  .progress.active{ display:block; }
+  .progress .bar{
+    height:100%;
+    width:0%;
+    background:var(--ink);
+    transition:width .2s;
+  }
+  .status{
+    margin-top:8px;
+    font-size:12px;
+    color:var(--body);
+    font-family:'Inter', sans-serif;
+    min-height:16px;
+  }
+
+  /* Coding-sheet ruler, echoing the classic COBOL coding form column zones */
+  .ruler{
+    display:none;
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    white-space:pre;
+    overflow-x:auto;
+    background:var(--paper-dark);
+    border:1px solid var(--ink);
+    border-bottom:none;
+    padding:6px 0 2px;
+  }
+  .ruler .zones, .ruler .numbers{
+    padding-left:14px;
+    min-width:max-content;
+  }
+  .ruler .zones span{
+    display:inline-block;
+  }
+  .ruler .zones .seq{ background:var(--canvas-soft); }
+  .ruler .zones .ind{ background:var(--ink); color:#fff; }
+  .ruler .zones .areaA{ background:#d9d9d9; }
+  .ruler .zones .areaB{ background:transparent; }
+  .ruler .zones span, .ruler .numbers span{
+    width: 8.4px;
+    text-align:center;
+  }
+  .ruler .legend{
+    padding-left:14px;
+    display:flex;
+    gap:14px;
+    font-size:10px;
+    color:var(--body);
+    margin-top:4px;
+  }
+  .ruler .legend i{ font-style:normal; padding:0 3px; border-radius:0; }
+  .ruler .legend .seq{ background:var(--canvas-soft); }
+  .ruler .legend .ind{ background:var(--ink); color:#fff; }
+  .ruler .legend .areaA{ background:#d9d9d9; }
+
+  .output-wrap{
+    border:1px solid var(--hairline);
+  }
+  textarea#output{
+    width:100%;
+    min-height:480px;
+    resize:vertical;
+    border:none;
+    background:var(--canvas);
+    color:var(--ink);
+    font-family:'IBM Plex Mono', monospace;
+    font-size:13px;
+    line-height:1.5;
+    padding:14px;
+    white-space:pre;
+    overflow-x:auto;
+    tab-size:1;
+  }
+  textarea#output:focus{ outline:1px solid var(--ink); outline-offset:-1px; }
+  .out-actions{
+    display:flex;
+    gap:10px;
+    margin-top:12px;
+    flex-wrap:wrap;
+  }
+  .out-actions button{
+    font-family:'Inter', sans-serif;
+    font-size:13px;
+    font-weight:700;
+    letter-spacing:0.2px;
+    padding:8px 14px;
+    border:1px solid var(--ink);
+    background:var(--canvas);
+    color:var(--ink);
+    border-radius:0;
+    cursor:pointer;
+  }
+  .out-actions button:hover{ background:var(--canvas-soft); }
+  #combineBtn{
+    font-family:'Inter', sans-serif;
+    font-size:13px;
+    font-weight:700;
+    letter-spacing:0.2px;
+    padding:8px 14px;
+    border:1px solid var(--ink);
+    background:var(--canvas);
+    color:var(--ink);
+    border-radius:0;
+    cursor:pointer;
+  }
+  #combineBtn:hover{ background:var(--canvas-soft); }
+  .empty-note{
+    color:var(--body);
+    font-size:13px;
+    font-family:'Inter', sans-serif;
+    padding:14px;
+  }
+  .hint{
+    font-size:12px;
+    font-family:'Inter', sans-serif;
+    color:var(--body);
+    margin-top:6px;
+    line-height:1.4;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">Developer tools</div>
+  <h1>CodeOCR <span class="tag">img → code</span></h1>
+  <p>Upload a screenshot of source code. This reads the characters back out and rebuilds each line at its
+     original column position, instead of just concatenating whatever the recognizer sees — so indentation and
+     column alignment survive the round trip. Currently tuned for COBOL's fixed-format columns; more languages
+     can be added as presets below.</p>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>1. Source image</h2>
+    <div class="dropzone" id="dropzone">
+      Drop PNG/JPG images here, click to choose files, or paste (Ctrl/Cmd+V)
+      <input type="file" id="fileInput" accept="image/*" multiple>
+    </div>
+    <div class="preview-wrap" id="previewWrap" style="display:none;">
+      <canvas id="previewCanvas"></canvas>
+    </div>
+
+    <div class="field" id="queueField" style="display:none;">
+      <label><span>Images queued</span><span id="queueCount">0</span></label>
+      <div class="job-toolbar">
+        <span>Sort:</span>
+        <button type="button" id="sortAlphaAsc" data-sort="alpha-asc" title="Sort A → Z">A→Z</button>
+        <button type="button" id="sortAlphaDesc" data-sort="alpha-desc" title="Sort Z → A">Z→A</button>
+        <button type="button" id="sortNumAsc" data-sort="num-asc" title="Sort by number, ascending">1→9</button>
+        <button type="button" id="sortNumDesc" data-sort="num-desc" title="Sort by number, descending">9→1</button>
+      </div>
+      <div class="job-list" id="jobList"></div>
+      <div class="hint">Drag the ⠿ handle to reorder manually, or use the sort buttons above. Click an image in the list to preview it and view its result once processed.</div>
+      <button id="combineBtn" type="button" style="display:none; margin-top:10px;">Combine all extracted text</button>
+    </div>
+
+    <h2 style="margin-top:20px;">2. Language preset</h2>
+    <div class="field" style="margin-top:0;">
+      <label><span>Source language</span></label>
+      <select id="langSelect" style="width:100%; font-family:'Inter', sans-serif; font-size:14px; padding:9px 8px; border:1px solid var(--ink); border-radius:0; background:var(--canvas); color:var(--ink);"></select>
+      <div class="hint" id="langHint"></div>
+    </div>
+
+    <h2 style="margin-top:20px;">3. Read settings</h2>
+    <div class="field">
+      <label><span>Upscale factor</span><span id="scaleVal">1.0×</span></label>
+      <input type="range" id="scale" min="1" max="6" step="0.5" value="1">
+      <div class="hint">Narrow images pack a lot of characters into few pixels. Upscaling before OCR
+      generally improves recognition of small monospace text.</div>
+    </div>
+    <div class="toggle-row">
+      <input type="checkbox" id="preprocess" checked>
+      <label for="preprocess">Enhance contrast (grayscale + threshold)</label>
+    </div>
+    <div class="toggle-row">
+      <input type="checkbox" id="strictCharset">
+      <label for="strictCharset" id="strictLabel">Restrict to language character set</label>
+    </div>
+
+    <div class="field">
+      <label><span>Parallel workers</span><span id="concurrencyVal">6</span></label>
+      <input type="range" id="concurrency" min="1" max="6" step="1" value="6">
+      <div class="hint">1 = process images one at a time (queue). Higher values run several images through
+      separate OCR workers at once — faster for a batch, but each worker uses its own share of CPU/memory.</div>
+    </div>
+
+    <button class="run" id="runBtn" disabled>Extract code</button>
+    <div class="progress" id="progress"><div class="bar" id="progressBar"></div></div>
+    <div class="status" id="status"></div>
+  </section>
+
+  <section>
+    <div class="ruler" id="ruler"><!-- filled by JS --></div>
+    <div class="output-wrap panel" style="border-radius:0;">
+      <textarea id="output" spellcheck="false" placeholder="Extracted code will appear here, column-aligned to the ruler above."></textarea>
+      <div class="out-actions">
+        <button id="copyBtn">Copy text</button>
+        <button id="downloadCbl">Download .<span id="downloadExt">cbl</span></button>
+        <button id="downloadTxt">Download .txt</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+<script src="ocr-handoff.js"></script>
+
+</body>
+</html>

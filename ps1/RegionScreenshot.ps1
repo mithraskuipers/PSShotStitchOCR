@@ -370,6 +370,15 @@ $ScriptRoot =
     elseif ($env:REGION_SCREENSHOT_ROOT) { $env:REGION_SCREENSHOT_ROOT }
     else { (Get-Location).Path }
 
+# $env:REGION_SCREENSHOT_ROOT may be a non-normalized literal path (e.g.
+# "...\bat\..\ps1") rather than a clean absolute one - Split-Path is pure
+# string parsing and won't collapse ".." segments the way the filesystem
+# does, so resolve to a real path first or $ProjectRoot below ends up
+# pointing at the wrong folder.
+if (Test-Path -LiteralPath $ScriptRoot) {
+    $ScriptRoot = (Resolve-Path -LiteralPath $ScriptRoot).ProviderPath
+}
+
 # The project root is one level up from the ps1\ folder (i.e. the folder
 # that contains ps1\, bat\, and Start_All.bat). Screenshots and stitched
 # output default to subfolders of this, not of ps1\, so they land next to

@@ -284,6 +284,36 @@
     URL.revokeObjectURL(url);
   }
 
+  // Hands a stitched sheet off to the CodeOCR tool. Only works when this
+  // page itself is being served by Start-ReviewWebServer.ps1 (which is
+  // what exposes /api/send-to-ocr) - a plain file:// / drag-drop load has
+  // nowhere to POST to, so that's surfaced as a normal error below rather
+  // than crashing anything.
+  async function sendToOcr(item, btn, statusEl) {
+    btn.disabled = true;
+    statusEl.className = 'ocrStatus';
+    statusEl.textContent = 'Sending…';
+    try {
+      const blob = await canvasToBlob(item.canvas);
+      const res = await fetch('/api/send-to-ocr?name=' + encodeURIComponent(item.filename), {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/png' },
+        body: blob,
+      });
+      let data = {};
+      try { data = await res.json(); } catch (e) { /* non-JSON error body, fall through */ }
+      if (!res.ok || !data.ok) throw new Error(data.error || `Server responded ${res.status}`);
+      window.open(data.url, '_blank');
+      statusEl.textContent = 'Opened in OCR tool ✓';
+    } catch (err) {
+      console.error('Send to OCR failed', err);
+      statusEl.className = 'ocrStatus error';
+      statusEl.textContent = "Couldn't send — " + (err.message || 'is the review server running?');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   stitchBtn.addEventListener('click', async () => {
     const included = state.entries.filter(e => e.included);
     if (included.length === 0) {
@@ -339,7 +369,10 @@
         name.textContent = `${item.filename} — ${item.sheet.width}×${item.sheet.height}px`;
         const btn = document.createElement('button'); btn.textContent = 'Download';
         btn.addEventListener('click', async () => downloadBlob(item.filename, await canvasToBlob(item.canvas)));
-        row.append(name, btn);
+        const ocrBtn = document.createElement('button'); ocrBtn.className = 'ocrBtn'; ocrBtn.textContent = 'Send to OCR';
+        const ocrStatus = document.createElement('span'); ocrStatus.className = 'ocrStatus';
+        ocrBtn.addEventListener('click', () => sendToOcr(item, ocrBtn, ocrStatus));
+        row.append(name, btn, ocrBtn, ocrStatus);
         downloadsBar.appendChild(row);
       }
 

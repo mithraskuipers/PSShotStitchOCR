@@ -1,2 +1,4 @@
 screenshots/
 Logs/
+handoff/
+.serve.lock

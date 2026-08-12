@@ -33,6 +33,13 @@ $ScriptRoot =
     elseif ($env:REGION_SCREENSHOT_ROOT) { $env:REGION_SCREENSHOT_ROOT }
     else { (Get-Location).Path }
 
+# See matching comment in RegionScreenshot.ps1: resolve to a real path
+# before Split-Path arithmetic, since $env:REGION_SCREENSHOT_ROOT can be a
+# literal, non-normalized path containing "..".
+if (Test-Path -LiteralPath $ScriptRoot) {
+    $ScriptRoot = (Resolve-Path -LiteralPath $ScriptRoot).ProviderPath
+}
+
 # One level up from ps1\ - see matching comment in RegionScreenshot.ps1.
 $ProjectRoot = Split-Path -Path $ScriptRoot -Parent
 if (-not $ProjectRoot) { $ProjectRoot = $ScriptRoot }
