@@ -141,6 +141,14 @@
       sourceBadge.textContent = data.folder ? `Session: ${data.folder}` : 'Loaded from capture session';
       closeServerBtn.style.display = '';
       await addBlobs(items);
+      // The last shot in an auto-capture session is often a stray/partial
+      // frame (e.g. the tick right before Stop was hit) - leave it in the
+      // list but unchecked by default so it doesn't silently end up in the
+      // stitched sheet unless the user deliberately re-checks it.
+      if (state.entries.length) {
+        state.entries[state.entries.length - 1].included = false;
+        renderGrid();
+      }
     } catch (err) {
       dropStatus.textContent = '';
     }
