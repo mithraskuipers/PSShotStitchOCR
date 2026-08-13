@@ -834,8 +834,21 @@
     a.click();
     document.body.removeChild(a);
   }
-  document.getElementById('downloadCbl').addEventListener('click', () => download(`extracted.${currentLang().extension}`, output.value));
-  document.getElementById('downloadTxt').addEventListener('click', () => download('extracted.txt', output.value));
+  // Base name for a downloaded output file: the source image's name minus
+  // its extension, so "screenshot_01.png" -> "screenshot_01.txt"/".cbl".
+  // Falls back to "combined" when the output box is showing every job's
+  // combined text, and to "extracted" if nothing is selected at all.
+  function downloadBaseName(){
+    if(viewingCombined) return 'combined';
+    const job = selectedJob();
+    if(job && job.name){
+      const dot = job.name.lastIndexOf('.');
+      return dot > 0 ? job.name.slice(0, dot) : job.name;
+    }
+    return 'extracted';
+  }
+  document.getElementById('downloadCbl').addEventListener('click', () => download(`${downloadBaseName()}.${currentLang().extension}`, output.value));
+  document.getElementById('downloadTxt').addEventListener('click', () => download(`${downloadBaseName()}.txt`, output.value));
 
   // ---------- Handoff from Screenshot Stitcher ----------
   // If we were navigated here via the stitcher's "Send to OCR" button
