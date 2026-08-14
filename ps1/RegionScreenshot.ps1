@@ -1284,44 +1284,33 @@ function Show-DuplicateFramePrompt {
         auto-capture timer is always stopped by the caller before this is
         shown, so no new capture can fire while it's up.
 
-        ROOT CAUSE OF "click Continue and nothing happens": the previous
-        version tracked which button was clicked with its own
-        $script:_dupPromptAnswer variable, set only inside the two
-        Add_Click handlers, and tried to guarantee it was never left
-        'None' by canceling FormClosing until that variable was set. In
-        practice the dialog still closed with the answer stuck at 'None'
-        even on a genuine click - the hand-rolled tracking had a gap
-        somewhere in that Click -> variable -> Close -> FormClosing chain
-        that reproduced on every test run, not just an edge case.
+        ROOT CAUSE, ROUND 2 - "buttons never enable, dialog just hangs
+        until force-closed": every log line's elapsed time read back as
+        -1ms, meaning $script:_dupPromptShownAt was still $null when read
+        even though the "prompt shown" line right above it proves the
+        write did happen. Writes made from *inside* the Add_Shown
+        .GetNewClosure() scriptblock were not reaching the real script
+        scope - contrary to what the closure was assumed to guarantee.
 
-        The fix is to stop hand-rolling this at all. WinForms already has
-        a mechanism for exactly this that doesn't have that gap:
-        Button.DialogResult. Setting it makes the framework itself close
-        the dialog with that result the moment the button is clicked, and
-        Form.ShowDialog() hands that result straight back as its return
-        value - there's no separate variable that can end up out of sync
-        with what was actually clicked.
+        That's also what silently broke the 700ms arm Timer: it was
+        created and Start()-ed inside that same closure, so the only
+        reference to it lived in the closure's own isolated scope. Once
+        Add_Shown finished running, nothing kept that Timer object alive,
+        so it was free to be garbage-collected before it ever ticked -
+        no error, no "armed" log line, buttons stuck disabled forever.
 
-        ControlBox = $false removes the system Close (X) button and
-        disables Alt+F4 on a FixedDialog form, so a button click is the
-        only way to close this dialog - no FormClosing guard needed to
-        enforce that.
-
-        Both buttons stay disabled for AutoCaptureDuplicatePromptArmDelayMs
-        (default 700ms) after the dialog appears, so a click or key
-        release already in flight the instant this dialog popped up can't
-        land on either one - a disabled WinForms button simply doesn't
-        fire Click, no message-pumping needed to guard against it.
-
-        Keystrokes are still swallowed entirely (KeyDown/KeyUp both
-        handled, buttons non-tab-stop): the auto-press feature can hold
-        or repeat a key, and a stray KeyUp reaching a focused button
-        could otherwise click it unattended.
+        Fix: don't capture anything via closure at all. Everything
+        Add_Shown needs is stashed in real $script: variables first, and
+        Add_Shown itself is a plain scriptblock that only ever reads/
+        writes $script: variables - nothing to isolate, nothing that can
+        end up as the sole reference inside a scope that goes away.
     #>
     param([Parameter(Mandatory)][double]$SimilarityPercent)
 
     $armDelayMs = [Math]::Max(0, [int]$script:Config.AutoCaptureDuplicatePromptArmDelayMs)
     $simText    = $SimilarityPercent.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
+
+    try {
 
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text            = 'Region Screenshot Tool - Auto-Capture Paused'
@@ -1374,20 +1363,18 @@ function Show-DuplicateFramePrompt {
 
     $script:_dupPromptShownAt = $null
 
-    # Script-scoped (not closure-captured) so the arm timer's Tick handler
-    # below - itself a scriptblock nested inside the Add_Shown scriptblock -
-    # resolves them unambiguously. Two GetNewClosure() calls nested inside
-    # each other is exactly the kind of thing that can lose a variable
-    # binding silently in PowerShell: that's what threw "The property
-    # 'Enabled' cannot be found on this object" from inside the Tick
-    # handler once clicks started reaching the buttons for real - $btnStop
-    # / $btnContinue / $lblArming were coming through as $null there.
-    # Script scope sidesteps closures entirely.
+    # All script-scoped (not closure-captured) - see the function comment
+    # above. Add_Shown below is a plain scriptblock with no
+    # .GetNewClosure(): it only ever touches these, so there's nothing for
+    # a closure to isolate and nothing whose only live reference could end
+    # up trapped inside one.
     $script:_dupDlg          = $dlg
     $script:_dupBtnStop      = $btnStop
     $script:_dupBtnContinue  = $btnContinue
     $script:_dupLblArming    = $lblArming
     $script:_dupArmTimer     = $null
+    $script:_dupArmDelayMs   = $armDelayMs
+    $script:_dupSimText      = $simText
 
     $dlg.KeyPreview = $true
     $dlg.Add_KeyDown({
@@ -1402,16 +1389,16 @@ function Show-DuplicateFramePrompt {
 
     $dlg.Add_Shown({
         $script:_dupPromptShownAt = Get-Date
-        Write-Log "Duplicate-frame prompt shown ($simText% similar)."
+        Write-Log "Duplicate-frame prompt shown ($($script:_dupSimText)% similar)."
 
         try {
-            [void][RegionTool.Native]::SetForegroundWindow($dlg.Handle)
-            $dlg.Activate()
+            [void][RegionTool.Native]::SetForegroundWindow($script:_dupDlg.Handle)
+            $script:_dupDlg.Activate()
         } catch { }
 
-        if ($armDelayMs -gt 0) {
+        if ($script:_dupArmDelayMs -gt 0) {
             $script:_dupArmTimer = New-Object System.Windows.Forms.Timer
-            $script:_dupArmTimer.Interval = $armDelayMs
+            $script:_dupArmTimer.Interval = $script:_dupArmDelayMs
             $script:_dupArmTimer.Add_Tick({
                 try {
                     $script:_dupArmTimer.Stop()
@@ -1435,7 +1422,7 @@ function Show-DuplicateFramePrompt {
             })
             $script:_dupArmTimer.Start()
         }
-    }.GetNewClosure())
+    })
 
     $result = $dlg.ShowDialog()
 
@@ -1456,6 +1443,22 @@ function Show-DuplicateFramePrompt {
         return $true
     }
     return ($result -eq [System.Windows.Forms.DialogResult]::Yes)
+
+    }
+    catch {
+        # Same reasoning as Show-ReviewHandoffPrompt's catch: without this,
+        # a dialog-construction/handling failure here read as "the popup
+        # flashed and auto-capture just stopped" with nothing in the log to
+        # explain why. Fail safe (treated as Stop, same as the "unexpected
+        # result" branch above) rather than silently letting capture continue
+        # on a broken dialog.
+        Write-Log "ERROR: duplicate-frame prompt failed: $($_.Exception.Message)"
+        Write-Log $_.ScriptStackTrace
+        $trayIcon.ShowBalloonTip(3000, 'Region Screenshot Tool',
+            "Duplicate-frame prompt failed: $($_.Exception.Message)",
+            [System.Windows.Forms.ToolTipIcon]::Warning)
+        return $true
+    }
 }
 
 function Test-DuplicateFrameAndMaybePause {
@@ -1519,6 +1522,18 @@ function Test-DuplicateFrameAndMaybePause {
     }
 
     Write-Log ("Auto-capture paused: shot is {0:N1}% similar to the previous one (threshold {1}%)." -f $similarity, $script:Config.AutoCaptureDuplicateThresholdPercent)
+
+    # Make sure the capture-flash overlay (and its own fade-out Timer) is
+    # fully gone before the modal duplicate-frame dialog opens. ShowDialog()
+    # pumps every Timer on this thread, not just the dialog's own - if the
+    # flash's Timer is still ticking, it fires mid-dialog and closes its own
+    # topmost window right as this topmost dialog is appearing, which is
+    # exactly the kind of interaction that can make an unowned modal dialog
+    # fold and close itself (DialogResult.Cancel) before it ever finishes
+    # activating. The flash has already served its purpose by this point,
+    # so there's nothing lost by cutting it short here.
+    Hide-CaptureFlash
+
     $script:autoCaptureTimer.Stop()
     $script:acStopFlag = 1
     $itemAutoCapture.Text = 'Auto-Capture Paused (similar frame)'
