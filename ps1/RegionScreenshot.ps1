@@ -90,6 +90,16 @@
     Run via "Start Screenshot Tool.bat" (handles STA + execution policy).
 #>
 
+param(
+    # Forces the automatic hand-off to Review & Stitch on auto-capture stop
+    # OFF for this run, regardless of AutoLaunchReviewOnStop in config.json.
+    # Used by Start_All.bat's "screenshot tool only" menu option so it
+    # never spawns the review web server; config.json itself is untouched,
+    # so every other launcher (including this same .bat run without the
+    # switch) keeps following the saved setting.
+    [switch]$NoAutoReview
+)
+
 # ---------------------------------------------------------------------------
 # WinForms requires an STA thread. Launch this script via the accompanying
 # .bat file (which passes -STA), or manually with:
@@ -624,6 +634,12 @@ function Set-TrayText([string]$text) {
 
 function Apply-Config {
     $script:Config = Get-ToolConfig
+    if ($NoAutoReview) {
+        # -NoAutoReview overrides whatever config.json says, on every load
+        # (including "Reload Config" from the tray menu) - not just at
+        # startup - so it can't be silently undone by a reload.
+        $script:Config.AutoLaunchReviewOnStop = $false
+    }
     if (-not (Test-Path -LiteralPath $script:Config.SaveLocation)) {
         New-Item -ItemType Directory -Path $script:Config.SaveLocation -Force | Out-Null
     }
