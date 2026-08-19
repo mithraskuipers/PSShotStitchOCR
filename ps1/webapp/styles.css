@@ -168,6 +168,15 @@ main{ flex:1; min-height:0; display:flex; }
   cursor:pointer; margin-bottom:4px;
 }
 .downloadAllBtn:hover{ filter:brightness(1.08); }
+.sendAllOcrRow{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; row-gap:6px; margin-bottom:4px; }
+.sendAllOcrBtn{
+  flex-shrink:0; background:transparent; color:var(--accent);
+  border:1px solid var(--accent-dim);
+  font-family:var(--sans); font-weight:600; font-size:12.5px; padding:9px 12px; border-radius:6px;
+  cursor:pointer;
+}
+.sendAllOcrBtn:hover{ background:rgba(47,168,158,0.12); }
+.sendAllOcrBtn:disabled{ opacity:.5; cursor:not-allowed; }
 .downloadRow{
   display:flex; align-items:center; flex-wrap:wrap; gap:8px; row-gap:6px;
   background:var(--panel-3); border:1px solid var(--line); border-radius:6px; padding:6px 8px;

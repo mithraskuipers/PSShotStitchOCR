@@ -240,7 +240,8 @@
       statusText: '',
       progressPct: 0,
       output: '',
-      error: null
+      error: null,
+      combine: true // whether this job's output is included when "Combine" runs
     };
     jobs.push(job);
     const img = new Image();
@@ -263,6 +264,61 @@
       : `Loaded ${files.length} images`;
   }
 
+  // ---------- Removing jobs from the queue ----------
+  function revokeJobImage(job){
+    if(job.img && job.img.src){
+      try{ URL.revokeObjectURL(job.img.src); }catch(e){ /* already revoked or never a blob URL */ }
+    }
+  }
+
+  // Removes a single job from the queue. Running jobs are left alone (the
+  // × button is disabled for them) so a slot mid-recognize doesn't get
+  // pulled out from under itself.
+  function removeJob(id){
+    const idx = jobs.findIndex(j => j.id === id);
+    if(idx === -1) return;
+    const job = jobs[idx];
+    if(job.status === 'running') return;
+    revokeJobImage(job);
+    jobs.splice(idx, 1);
+
+    if(selectedJobId === id){
+      selectedJobId = null;
+      viewingCombined = false;
+      const next = jobs[idx] || jobs[idx - 1] || null;
+      if(next){
+        selectJob(next.id);
+      } else {
+        output.value = '';
+        previewWrap.style.display = 'none';
+        buildRuler(80);
+        statusEl.textContent = jobs.length ? '' : 'No images loaded.';
+      }
+    }
+    renderJobList();
+  }
+
+  // Removes every job that isn't currently running.
+  function clearAllJobs(){
+    const removable = jobs.filter(j => j.status !== 'running');
+    if(!removable.length) return;
+    removable.forEach(revokeJobImage);
+    const runningIds = new Set(jobs.filter(j => j.status === 'running').map(j => j.id));
+    jobs = jobs.filter(j => runningIds.has(j.id));
+
+    if(selectedJobId !== null && !runningIds.has(selectedJobId)){
+      selectedJobId = null;
+      viewingCombined = false;
+      output.value = '';
+      previewWrap.style.display = 'none';
+      buildRuler(80);
+    }
+    statusEl.textContent = jobs.length
+      ? `Cleared queue — ${jobs.length} image(s) still running were kept.`
+      : 'Cleared queue.';
+    renderJobList();
+  }
+
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
   }
@@ -282,13 +338,30 @@
     jobList.innerHTML = jobs.map(job => `
       <div class="job-row${job.id === selectedJobId ? ' selected' : ''}" data-job-id="${job.id}" draggable="true">
         <span class="job-drag-handle" title="Drag to reorder">⠿</span>
+        <input type="checkbox" class="job-combine-chk" data-job-id="${job.id}" ${job.combine ? 'checked' : ''} title="Include this image's text when combining">
         <span class="job-name">${escapeHtml(job.name)}</span>
         <span class="job-status ${job.status}">${statusBadge(job)}</span>
+        <button type="button" class="job-remove" data-job-id="${job.id}" title="Remove from queue" ${job.status === 'running' ? 'disabled' : ''}>×</button>
       </div>`).join('');
+    jobList.querySelectorAll('.job-combine-chk').forEach(chk => {
+      chk.addEventListener('click', e => e.stopPropagation());
+      chk.addEventListener('change', () => {
+        const job = jobs.find(j => j.id === parseInt(chk.dataset.jobId, 10));
+        if(job) job.combine = chk.checked;
+      });
+    });
+    jobList.querySelectorAll('.job-remove').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        removeJob(parseInt(btn.dataset.jobId, 10));
+      });
+    });
     jobList.querySelectorAll('.job-row').forEach(row => {
       row.addEventListener('click', (e) => {
-        // Ignore clicks that were really the tail end of a drag on the handle.
+        // Ignore clicks that were really the tail end of a drag on the handle,
+        // and clicks on the per-row checkbox/remove controls.
         if(e.target.closest('.job-drag-handle') && dragJobId !== null) return;
+        if(e.target.closest('.job-combine-chk') || e.target.closest('.job-remove')) return;
         selectJob(parseInt(row.dataset.jobId, 10));
       });
       row.addEventListener('dragstart', (e) => {
@@ -420,9 +493,14 @@
   // added on top, then each next image's text below it) into the output
   // box, so you don't have to copy each result out one at a time.
   combineBtn.addEventListener('click', () => {
-    const doneJobs = jobs.filter(j => j.status === 'done' && j.output);
+    const selectedJobs = jobs.filter(j => j.combine);
+    if(!selectedJobs.length){
+      statusEl.textContent = 'No images selected to combine — check the boxes next to the ones you want.';
+      return;
+    }
+    const doneJobs = selectedJobs.filter(j => j.status === 'done' && j.output);
     if(!doneJobs.length){
-      statusEl.textContent = 'No completed results yet to combine — run OCR first.';
+      statusEl.textContent = 'None of the selected images have finished OCR yet — run OCR first.';
       return;
     }
     const combined = doneJobs.map(j => j.output.replace(/\s+$/, '')).join('\n\n');
@@ -432,9 +510,19 @@
     previewWrap.style.display = 'none';
     const maxLineLen = Math.max(80, ...combined.split('\n').map(l => l.length));
     buildRuler(maxLineLen);
-    statusEl.textContent = doneJobs.length === jobs.length
-      ? `Combined all ${doneJobs.length} results (top to bottom, in queue order).`
-      : `Combined ${doneJobs.length} of ${jobs.length} finished results — the rest haven't been processed yet.`;
+    statusEl.textContent = doneJobs.length === selectedJobs.length
+      ? `Combined ${doneJobs.length} selected result(s) (top to bottom, in queue order).`
+      : `Combined ${doneJobs.length} of ${selectedJobs.length} selected results — the rest haven't finished OCR yet.`;
+    renderJobList();
+  });
+
+  document.getElementById('clearAllJobsBtn').addEventListener('click', clearAllJobs);
+  document.getElementById('combineSelectAllBtn').addEventListener('click', () => {
+    jobs.forEach(j => j.combine = true);
+    renderJobList();
+  });
+  document.getElementById('combineSelectNoneBtn').addEventListener('click', () => {
+    jobs.forEach(j => j.combine = false);
     renderJobList();
   });
 

@@ -116,37 +116,45 @@ try {
             $localPath = $request.Url.LocalPath
             if ($localPath -eq "/") { $localPath = "/index.html" }
 
-            # Single-slot hand-off from the Screenshot Stitcher's
-            # /api/send-to-ocr: written to $lockRoot\handoff\pending.png
-            # (the project root, not $root/WebRoot - so it's never
-            # reachable as an ordinary static file). Served once, then
-            # deleted, so a page refresh after the fact doesn't re-load a
-            # stale image and a second hand-off can't accidentally combine
-            # with a leftover one.
-            if ($localPath -eq "/api/pending-image") {
-                $handoffFile = Join-Path $lockRoot 'handoff\pending.png'
-                $nameFile = Join-Path $lockRoot 'handoff\pending.name.txt'
-                if (Test-Path -LiteralPath $handoffFile -PathType Leaf) {
-                    $bytes = [IO.File]::ReadAllBytes($handoffFile)
-                    if (Test-Path -LiteralPath $nameFile -PathType Leaf) {
-                        $origName = (Get-Content -LiteralPath $nameFile -Raw).Trim()
-                        # Header values must be ASCII-safe - percent-encode so any
-                        # unicode/space in the filename survives the round trip.
-                        $response.Headers.Add('X-Original-Name', [Uri]::EscapeDataString($origName))
-                        Remove-Item -LiteralPath $nameFile -Force -ErrorAction SilentlyContinue
+            # Multi-slot hand-off from the Screenshot Stitcher's
+            # /api/send-to-ocr: each stitched sheet gets written to its own
+            # file under $lockRoot\handoff\queue\ (the project root, not
+            # $root/WebRoot - so it's never reachable as an ordinary static
+            # file). This lets "Send all to OCR" queue up several sheets
+            # from separate POSTs and have them all picked up together by
+            # one page load, instead of a single slot getting clobbered by
+            # whichever POST lands last. Everything found here is read,
+            # base64-encoded into one JSON response, and then deleted, so a
+            # page refresh after the fact doesn't re-load images that were
+            # already handed off.
+            if ($localPath -eq "/api/pending-images") {
+                $queueDir = Join-Path $lockRoot 'handoff\queue'
+                $items = New-Object System.Collections.Generic.List[string]
+                if (Test-Path -LiteralPath $queueDir -PathType Container) {
+                    $pngFiles = Get-ChildItem -LiteralPath $queueDir -Filter '*.png' -File -ErrorAction SilentlyContinue | Sort-Object Name
+                    foreach ($png in $pngFiles) {
+                        $bytes = [IO.File]::ReadAllBytes($png.FullName)
+                        $nameFile = Join-Path $queueDir ($png.BaseName + '.name.txt')
+                        $origName = $png.Name
+                        if (Test-Path -LiteralPath $nameFile -PathType Leaf) {
+                            $origName = (Get-Content -LiteralPath $nameFile -Raw).Trim()
+                        }
+                        # Minimal JSON string escaping - filenames are the only
+                        # free-form text going into this hand-built JSON.
+                        $escName = $origName -replace '\\', '\\\\' -replace '"', '\"'
+                        $items.Add('{"name":"' + $escName + '","data":"' + [Convert]::ToBase64String($bytes) + '"}')
+                        Remove-Item -LiteralPath $png.FullName -Force -ErrorAction SilentlyContinue
+                        if (Test-Path -LiteralPath $nameFile -PathType Leaf) {
+                            Remove-Item -LiteralPath $nameFile -Force -ErrorAction SilentlyContinue
+                        }
                     }
-                    Remove-Item -LiteralPath $handoffFile -Force -ErrorAction SilentlyContinue
-                    $response.ContentType = 'image/png'
-                    $response.ContentLength64 = $bytes.Length
-                    $response.StatusCode = 200
-                    $response.OutputStream.Write($bytes, 0, $bytes.Length)
-                } else {
-                    $response.StatusCode = 404
-                    $notFoundBytes = [Text.Encoding]::UTF8.GetBytes('{"ok":false,"error":"no pending image"}')
-                    $response.ContentType = 'application/json'
-                    $response.ContentLength64 = $notFoundBytes.Length
-                    $response.OutputStream.Write($notFoundBytes, 0, $notFoundBytes.Length)
                 }
+                $json = '[' + ($items -join ',') + ']'
+                $jsonBytes = [Text.Encoding]::UTF8.GetBytes($json)
+                $response.ContentType = 'application/json'
+                $response.ContentLength64 = $jsonBytes.Length
+                $response.StatusCode = 200
+                $response.OutputStream.Write($jsonBytes, 0, $jsonBytes.Length)
             }
             else {
 

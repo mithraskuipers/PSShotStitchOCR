@@ -348,18 +348,22 @@ while ($running -and $listener.IsListening) {
 
                 $port = Start-OcrServerIfNeeded -ServeScript $OcrServeScript -WebRoot $OcrWebRoot -ProjectRoot $OcrProjectRoot
 
-                # Single-slot hand-off: written to the OCR tool's own project
-                # root (not its served WebRoot), so it's never reachable as
-                # a static file. serve.ps1's /api/pending-image reads and
-                # then deletes this - one image in flight at a time.
-                $handoffDir = Join-Path $OcrProjectRoot 'handoff'
-                New-Item -ItemType Directory -Path $handoffDir -Force -ErrorAction SilentlyContinue | Out-Null
-                $handoffFile = Join-Path $handoffDir 'pending.png'
-                [System.IO.File]::WriteAllBytes($handoffFile, $imageBytes)
+                # Multi-slot hand-off: each stitched sheet gets its own file
+                # under the OCR tool's own project root (not its served
+                # WebRoot, so it's never reachable as a static file). This
+                # lets "Send all to OCR" queue up several sheets across
+                # separate POSTs without one clobbering another - serve.ps1's
+                # /api/pending-images reads and then deletes everything
+                # sitting in this folder in one go.
+                $queueDir = Join-Path $OcrProjectRoot 'handoff\queue'
+                New-Item -ItemType Directory -Path $queueDir -Force -ErrorAction SilentlyContinue | Out-Null
+                $itemId = [Guid]::NewGuid().ToString('N')
+                $imageFile = Join-Path $queueDir "$itemId.png"
+                [System.IO.File]::WriteAllBytes($imageFile, $imageBytes)
 
                 $requestedName = $request.QueryString['name']
                 if ($requestedName) {
-                    $nameFile = Join-Path $handoffDir 'pending.name.txt'
+                    $nameFile = Join-Path $queueDir "$itemId.name.txt"
                     Set-Content -LiteralPath $nameFile -Value $requestedName -Encoding UTF8 -NoNewline
                 }
 

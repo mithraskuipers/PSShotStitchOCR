@@ -292,26 +292,32 @@
     URL.revokeObjectURL(url);
   }
 
-  // Hands a stitched sheet off to the CodeOCR tool. Only works when this
-  // page itself is being served by Start-ReviewWebServer.ps1 (which is
-  // what exposes /api/send-to-ocr) - a plain file:// / drag-drop load has
-  // nowhere to POST to, so that's surfaced as a normal error below rather
-  // than crashing anything.
+  // Uploads one stitched sheet to the CodeOCR tool's hand-off queue and
+  // returns the URL to open it in. Only works when this page itself is
+  // being served by Start-ReviewWebServer.ps1 (which is what exposes
+  // /api/send-to-ocr) - a plain file:// / drag-drop load has nowhere to
+  // POST to, so that surfaces as a normal thrown error.
+  async function uploadToOcr(item) {
+    const blob = await canvasToBlob(item.canvas);
+    const res = await fetch('/api/send-to-ocr?name=' + encodeURIComponent(item.filename), {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* non-JSON error body, fall through */ }
+    if (!res.ok || !data.ok) throw new Error(data.error || `Server responded ${res.status}`);
+    return data.url;
+  }
+
+  // Hands a single stitched sheet off to CodeOCR and opens it in its own tab.
   async function sendToOcr(item, btn, statusEl) {
     btn.disabled = true;
     statusEl.className = 'ocrStatus';
     statusEl.textContent = 'Sending…';
     try {
-      const blob = await canvasToBlob(item.canvas);
-      const res = await fetch('/api/send-to-ocr?name=' + encodeURIComponent(item.filename), {
-        method: 'POST',
-        headers: { 'Content-Type': 'image/png' },
-        body: blob,
-      });
-      let data = {};
-      try { data = await res.json(); } catch (e) { /* non-JSON error body, fall through */ }
-      if (!res.ok || !data.ok) throw new Error(data.error || `Server responded ${res.status}`);
-      window.open(data.url, '_blank');
+      const url = await uploadToOcr(item);
+      window.open(url, '_blank');
       statusEl.textContent = 'Opened in OCR tool ✓';
     } catch (err) {
       console.error('Send to OCR failed', err);
@@ -320,6 +326,35 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // Hands every stitched sheet off to CodeOCR's hand-off queue, one upload
+  // at a time, then opens a single OCR tab that picks up the whole batch at
+  // once (see ocr-handoff.js's /api/pending-images fetch on that end).
+  async function sendAllToOcr(items, btn, statusEl) {
+    btn.disabled = true;
+    statusEl.className = 'ocrStatus';
+    statusEl.textContent = `Sending ${items.length} sheet(s)…`;
+    let url = null;
+    let failCount = 0;
+    for (const item of items) {
+      try {
+        url = await uploadToOcr(item);
+      } catch (err) {
+        console.error('Send to OCR failed for', item.filename, err);
+        failCount++;
+      }
+    }
+    btn.disabled = false;
+    if (!url) {
+      statusEl.className = 'ocrStatus error';
+      statusEl.textContent = "Couldn't send — is the review server running?";
+      return;
+    }
+    window.open(url, '_blank');
+    statusEl.textContent = failCount
+      ? `Opened in OCR tool ✓ (${failCount} of ${items.length} failed to send)`
+      : `Sent all ${items.length} sheet(s) — opened in OCR tool ✓`;
   }
 
   stitchBtn.addEventListener('click', async () => {
@@ -369,6 +404,15 @@
           }
         });
         downloadsBar.appendChild(allBtn);
+
+        const allOcrRow = document.createElement('div'); allOcrRow.className = 'sendAllOcrRow';
+        const allOcrBtn = document.createElement('button');
+        allOcrBtn.className = 'sendAllOcrBtn';
+        allOcrBtn.textContent = `Send all to OCR (${built.length})`;
+        const allOcrStatus = document.createElement('span'); allOcrStatus.className = 'ocrStatus';
+        allOcrBtn.addEventListener('click', () => sendAllToOcr(built, allOcrBtn, allOcrStatus));
+        allOcrRow.append(allOcrBtn, allOcrStatus);
+        downloadsBar.appendChild(allOcrRow);
       }
 
       for (const item of built) {
