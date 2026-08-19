@@ -3,8 +3,12 @@
     Region screenshot tool.
 
 .DESCRIPTION
-    On startup, lets you drag out a rectangle on your screen(s) to define a
-    capture region. Once selected, the tool sits in the system tray and
+    On startup, lets you define a capture region either by hovering a
+    window and clicking it - the hovered window is highlighted in amber as
+    you move over it, and clicking (without dragging) captures exactly its
+    own on-screen bounds - or by dragging out a completely custom rectangle
+    on your screen(s), same as before. Once selected, the tool sits in the
+    system tray and
     listens for a capture hotkey (which can be a combo of up to 4 keys
     and/or mouse buttons - side buttons, middle-click, etc. - e.g.
     Ctrl+Shift+S) and a separate stop hotkey (default Ctrl+Shift+Q)
@@ -66,7 +70,8 @@
     defaults are used.
 
     Tray icon menu options:
-        - Reselect Region        : redraw the capture rectangle
+        - Reselect Region / Window: click a window to capture it, or drag
+                                    out a custom rectangle, same as startup
         - Hide/Show Region Border: toggles the red region outline
         - Open Screenshots       : opens the output folder in Explorer
         - Start/Stop Auto-Capture: toggles automatic timed capturing
@@ -278,6 +283,112 @@ namespace RegionTool
                 e.Graphics.DrawRectangle(pen, half, half,
                     this.Width - BorderThickness, this.Height - BorderThickness);
             }
+        }
+    }
+}
+"@
+
+# Window-under-cursor lookup for the "click a window to capture it" mode in
+# Select-Region below. Deliberately NOT done via WindowFromPoint: that API
+# hit-tests by Z-order, and the full-screen picker overlay is itself the
+# topmost window at every point on screen, so it would just find itself.
+# Instead this walks all top-level windows via EnumWindows - which hands
+# them to the callback in Z-order, topmost first - skipping the overlay's
+# own handle, invisible/minimized/tool windows, and untitled windows, and
+# returns the first (i.e. topmost real) one whose bounds contain the point.
+# TryGetVisibleRect prefers DWM's extended frame bounds over the raw window
+# rect where available, since on Windows 10/11 most app windows have an
+# invisible resize/shadow margin a few pixels wide outside what's actually
+# drawn - using the raw rect would draw the highlight (and crop the capture)
+# a few pixels too big on every side.
+# ---------------------------------------------------------------------------
+Add-Type -Language CSharp -ReferencedAssemblies System.Drawing -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace RegionTool
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    public static class WindowPicker
+    {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
+        public static IntPtr FindWindowAt(int x, int y, IntPtr excludeHwnd)
+        {
+            IntPtr found = IntPtr.Zero;
+            EnumWindowsProc callback = (hWnd, lParam) =>
+            {
+                if (hWnd == excludeHwnd) return true;
+                if (!IsWindowVisible(hWnd) || IsIconic(hWnd)) return true;
+                // Tool windows (palettes, etc.) don't show up in Alt-Tab and
+                // are rarely what someone means by "a window" to capture.
+                int exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
+                if ((exStyle & WS_EX_TOOLWINDOW) != 0) return true;
+                if (GetWindowTextLength(hWnd) == 0) return true;
+
+                RECT r;
+                if (!GetWindowRect(hWnd, out r)) return true;
+                if (r.Right <= r.Left || r.Bottom <= r.Top) return true;
+                if (x < r.Left || x >= r.Right || y < r.Top || y >= r.Bottom) return true;
+
+                found = hWnd;
+                return false; // stop enumeration - first match is topmost
+            };
+            EnumWindows(callback, IntPtr.Zero);
+            return found;
+        }
+
+        public static bool TryGetVisibleRect(IntPtr hwnd, out RECT rect)
+        {
+            if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out rect, Marshal.SizeOf(typeof(RECT))) == 0)
+                return true;
+            return GetWindowRect(hwnd, out rect);
+        }
+
+        public static string GetTitle(IntPtr hwnd)
+        {
+            int len = GetWindowTextLength(hwnd);
+            if (len <= 0) return "";
+            StringBuilder sb = new StringBuilder(len + 1);
+            GetWindowText(hwnd, sb, sb.Capacity);
+            return sb.ToString();
         }
     }
 }
@@ -653,13 +764,28 @@ function Apply-Config {
 # ---------------------------------------------------------------------------
 function Select-Region {
     <#
-        Shows a semi-transparent full-virtual-screen overlay. Drag with the
-        left mouse button to draw a rectangle. Release to confirm, or press
-        Esc to cancel. Returns a System.Drawing.Rectangle, or $null if
-        cancelled.
+        Shows a semi-transparent full-virtual-screen overlay for choosing the
+        capture area, two ways at once:
+
+          - Hover over any window and click it (release the mouse without
+            moving it more than a few pixels) to capture exactly that
+            window's own current bounds. The hovered window is highlighted
+            live, in amber, as the cursor moves over it - using DWM's
+            "extended frame bounds" where available rather than the raw
+            window rect, since most apps on Windows 10/11 have a few pixels
+            of invisible resize border outside what's actually drawn, and
+            using the raw rect would highlight (and capture) a bit too much
+            on every side.
+          - Or click-and-drag, exactly as before, to draw a completely
+            custom rectangle - shown in red while dragging, and unrelated to
+            any window boundary.
+
+        Whichever one you do, releasing the mouse confirms it. Esc cancels.
+        Returns a System.Drawing.Rectangle, or $null if cancelled.
     #>
 
     $virtualScreen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $dragThreshold = 4  # px of mouse movement before a click counts as a drag
 
     $form = New-Object System.Windows.Forms.Form
     $form.StartPosition   = 'Manual'
@@ -673,10 +799,31 @@ function Select-Region {
     $form.ShowInTaskbar   = $false
     $form.KeyPreview      = $true
 
-    $script:dragging   = $false
-    $script:startPoint = New-Object System.Drawing.Point 0, 0
-    $script:currentRect = New-Object System.Drawing.Rectangle 0, 0, 0, 0
+    # Force the window handle to exist now, before any mouse lookups run -
+    # WindowPicker.FindWindowAt needs it to exclude this overlay from its
+    # Z-order walk (otherwise it would just find this fullscreen overlay
+    # itself under the cursor every time, since it's always topmost).
+    [void]$form.Handle
+
+    $script:dragging        = $false
+    $script:startPoint      = New-Object System.Drawing.Point 0, 0
+    $script:currentRect     = New-Object System.Drawing.Rectangle 0, 0, 0, 0
+    # hoverRect is kept in virtual-screen coordinates (what GetWindowRect /
+    # DwmGetWindowAttribute hand back), not form-local ones, so it can be
+    # used directly as the final selection without another conversion.
+    $script:hoverRect       = New-Object System.Drawing.Rectangle 0, 0, 0, 0
+    $script:hoverTitle      = ''
     $script:selectionResult = $null
+
+    $defaultHint = 'Click a window to capture it, or drag to draw a custom region.  Esc to cancel.'
+
+    $hint = New-Object System.Windows.Forms.Label
+    $hint.Text      = $defaultHint
+    $hint.ForeColor = [System.Drawing.Color]::White
+    $hint.BackColor = [System.Drawing.Color]::Black
+    $hint.AutoSize  = $true
+    $hint.Location  = New-Object System.Drawing.Point 20, 20
+    $form.Controls.Add($hint)
 
     $form.Add_MouseDown({
         param($s, $e)
@@ -688,21 +835,71 @@ function Select-Region {
 
     $form.Add_MouseMove({
         param($s, $e)
+
         if ($script:dragging) {
-            $x = [Math]::Min($script:startPoint.X, $e.X)
-            $y = [Math]::Min($script:startPoint.Y, $e.Y)
-            $w = [Math]::Abs($e.X - $script:startPoint.X)
-            $h = [Math]::Abs($e.Y - $script:startPoint.Y)
-            $script:currentRect = New-Object System.Drawing.Rectangle $x, $y, $w, $h
-            $form.Invalidate()
+            $dx = [Math]::Abs($e.X - $script:startPoint.X)
+            $dy = [Math]::Abs($e.Y - $script:startPoint.Y)
+            if ($dx -gt $dragThreshold -or $dy -gt $dragThreshold) {
+                # Moved past the click threshold - this is a rectangle drag,
+                # not a window click, so draw the free rectangle and drop
+                # the window highlight.
+                $x = [Math]::Min($script:startPoint.X, $e.X)
+                $y = [Math]::Min($script:startPoint.Y, $e.Y)
+                $w = [Math]::Abs($e.X - $script:startPoint.X)
+                $h = [Math]::Abs($e.Y - $script:startPoint.Y)
+                $script:currentRect = New-Object System.Drawing.Rectangle $x, $y, $w, $h
+                $script:hoverRect   = New-Object System.Drawing.Rectangle 0, 0, 0, 0
+                $hint.Text = $defaultHint
+                $form.Invalidate()
+            }
+            return
         }
+
+        $screenX = $e.X + $virtualScreen.X
+        $screenY = $e.Y + $virtualScreen.Y
+        $hwnd = [RegionTool.WindowPicker]::FindWindowAt($screenX, $screenY, $form.Handle)
+
+        if ($hwnd -eq [IntPtr]::Zero) {
+            $script:hoverRect  = New-Object System.Drawing.Rectangle 0, 0, 0, 0
+            $script:hoverTitle = ''
+            $hint.Text = $defaultHint
+            $form.Invalidate()
+            return
+        }
+
+        $rect = New-Object RegionTool.RECT
+        [void][RegionTool.WindowPicker]::TryGetVisibleRect($hwnd, [ref]$rect)
+        $w = $rect.Right - $rect.Left
+        $h = $rect.Bottom - $rect.Top
+        if ($w -le 0 -or $h -le 0) {
+            $script:hoverRect  = New-Object System.Drawing.Rectangle 0, 0, 0, 0
+            $script:hoverTitle = ''
+            $hint.Text = $defaultHint
+            $form.Invalidate()
+            return
+        }
+
+        $script:hoverRect  = New-Object System.Drawing.Rectangle $rect.Left, $rect.Top, $w, $h
+        $script:hoverTitle = [RegionTool.WindowPicker]::GetTitle($hwnd)
+        $titleText = if ($script:hoverTitle) { $script:hoverTitle } else { '(untitled window)' }
+        $hint.Text = "Click to capture: $titleText  ($w x $h)`nOr drag for a custom region.  Esc to cancel."
+        $form.Invalidate()
     })
 
     $form.Add_MouseUp({
         param($s, $e)
         if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $script:dragging) {
             $script:dragging = $false
-            if ($script:currentRect.Width -gt 2 -and $script:currentRect.Height -gt 2) {
+            $dx = [Math]::Abs($e.X - $script:startPoint.X)
+            $dy = [Math]::Abs($e.Y - $script:startPoint.Y)
+
+            if ($dx -le $dragThreshold -and $dy -le $dragThreshold -and $script:hoverRect.Width -gt 0) {
+                # A click, not a drag, while a window was highlighted -
+                # capture that window's own bounds. Already in
+                # virtual-screen coordinates, so no conversion needed.
+                $script:selectionResult = $script:hoverRect
+            }
+            elseif ($script:currentRect.Width -gt 2 -and $script:currentRect.Height -gt 2) {
                 # Convert from form-local coords to virtual-screen coords
                 $script:selectionResult = New-Object System.Drawing.Rectangle (
                     $script:currentRect.X + $virtualScreen.X),
@@ -729,15 +926,23 @@ function Select-Region {
             $e.Graphics.DrawRectangle($pen, $script:currentRect)
             $pen.Dispose()
         }
+        elseif ($script:hoverRect.Width -gt 0 -and $script:hoverRect.Height -gt 0) {
+            # hoverRect is in virtual-screen coords - bring it back to
+            # form-local coords (the inverse of the MouseUp conversion
+            # above) purely for drawing.
+            $local = New-Object System.Drawing.Rectangle (
+                $script:hoverRect.X - $virtualScreen.X),
+                ($script:hoverRect.Y - $virtualScreen.Y),
+                ($script:hoverRect.Width),
+                ($script:hoverRect.Height)
+            $fillBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(50, 255, 176, 32))
+            $e.Graphics.FillRectangle($fillBrush, $local)
+            $fillBrush.Dispose()
+            $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 176, 32)), 3
+            $e.Graphics.DrawRectangle($pen, $local)
+            $pen.Dispose()
+        }
     })
-
-    $hint = New-Object System.Windows.Forms.Label
-    $hint.Text      = 'Drag to select the capture region.  Esc to cancel.'
-    $hint.ForeColor = [System.Drawing.Color]::White
-    $hint.BackColor = [System.Drawing.Color]::Black
-    $hint.AutoSize  = $true
-    $hint.Location  = New-Object System.Drawing.Point 20, 20
-    $form.Controls.Add($hint)
 
     [void]$form.ShowDialog()
     $form.Dispose()
@@ -1162,7 +1367,7 @@ Set-TrayText "Region Screenshot Tool ($($Config.HotkeyName) capture / $($Config.
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 
-$itemReselect     = $menu.Items.Add('Reselect Region')
+$itemReselect     = $menu.Items.Add('Reselect Region / Window')
 $itemToggleBorder = $menu.Items.Add('Hide Region Border')
 $itemOpenDir      = $menu.Items.Add('Open Screenshots Folder')
 [void]$menu.Items.Add('-')
